@@ -1,0 +1,104 @@
+name: omni_explorer
+description: A comprehensive file explorer and media suite for Android, Linux and Windows.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ── State Management ────────────────────────────────────────────────────────
+  provider: ^6.1.2
+  permission_handler: ^12.0.1
+
+  # ── File System ─────────────────────────────────────────────────────────────
+  path_provider: ^2.1.3
+  path: ^1.9.0
+  file_picker: ^8.1.2
+  mime: ^1.0.5
+  intl: ^0.19.0
+
+  # ── Storage / Preferences ───────────────────────────────────────────────────
+  shared_preferences: ^2.2.3
+  sqflite: ^2.3.3+1
+  sqflite_common_ffi: ^2.3.4
+
+  # ── Media Player ────────────────────────────────────────────────────────────
+  just_audio: ^0.9.40
+  just_audio_background: ^0.0.1-beta.12
+  audio_session: ^0.1.21
+  wakelock_plus: ^1.5.2
+  # Lecteur vidéo avancé (libmpv / ExoPlayer) — pistes audio + sous-titres,
+  # changement d'engine pour activer track switching, sub-rendering custom, etc.
+  media_kit: ^1.2.0
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.5
+  # Gestes vidéo : luminosité (gauche) et volume (droite).
+  screen_brightness: ^2.1.2
+  volume_controller: ^3.5.0
+
+  # ── Image Viewer ────────────────────────────────────────────────────────────
+  # photo_view ^0.15.0 est utilisé directement ET par pdfx >=2.9.0
+  # pdfx >=2.9.0 n'embarque plus photo_view, on le déclare séparément
+  photo_view: ^0.15.0
+  extended_image: ^8.2.1
+
+  # ── PDF Viewer ──────────────────────────────────────────────────────────────
+  # pdfx >=2.9.0 requiert web ^1.1.1 (compatible avec share_plus >=10.1.0)
+  pdfx: ^2.9.0
+
+  # ── Markdown ────────────────────────────────────────────────────────────────
+  flutter_markdown: ^0.7.3
+  markdown: ^7.2.2
+
+  # ── Code Editor ─────────────────────────────────────────────────────────────
+  re_editor: ^0.8.0
+  re_highlight: ^0.0.3
+
+  # ── SSH Terminal (Debian VM / AVF) ───────────────────────────────────────────
+  dartssh2: ^2.17.1
+  xterm: ^4.0.0
+
+  # ── Icons & UI ──────────────────────────────────────────────────────────────
+  flutter_svg: ^2.0.10+1
+  material_design_icons_flutter: ^7.0.7296
+  google_fonts: ^8.0.2
+
+  # ── Éditeur vidéo (#2) ──────────────────────────────────────────────────────
+  ffmpeg_kit_flutter_new: ^3.2.0
+  fraction: ^5.0.4
+  transparent_image: ^2.0.1 # show fade-in placeholder in thumbnails generation
+  video_player: ^2.6.1
+
+  # ── Utilities ───────────────────────────────────────────────────────────────
+  uuid: ^4.4.2
+  archive: ^3.6.1
+  open_filex: ^4.4.0
+  # share_plus >=10.1.0 utilise web ^1.0.0, compatible avec pdfx >=2.9.0
+  # share_plus 10.x garde l'ancienne API Share.share() — pas de breaking change
+  share_plus: ^10.1.4
+  url_launcher: ^6.3.0
+  go_router: ^17.1.0
+  external_path: ^2.2.0
+  flutter_highlight: ^0.7.0
+  cupertino_icons: ^1.0.9
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+dependency_overrides:
+  re_editor:
+    path: packages/re_editor
+  material_design_icons_flutter:
+    path: packages/material_design_icons_flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icons/
+    - assets/fonts/

@@ -1,0 +1,136 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ── Stockage (API ≤ 32 / Android ≤ 12) ─────────────────────────────── -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+
+    <!-- ── Bluetooth usage ────────────────────────────────────────────────── -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <!-- ── Use Biometric authentication ───────────────────────────────────── -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+
+    <!-- ── Médias granulaires (API 33+ / Android 13+) ─────────────────────── -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+
+    <!-- ── Accès partiel aux photos/vidéos (API 34+ / Android 14+) ─────────── -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.READ_DEVICE_CONFIG" />
+
+    <!-- ── Lecture des métadonnées EXIF (géolocalisation des photos) ───────── -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+
+    <!-- ── Accès total au stockage (explorateur de fichiers complet) ─────────
+         Nécessite une déclaration sur le Play Store (politique MANAGE_EXTERNAL_STORAGE).
+         Utilisé uniquement pour naviguer en dehors des dossiers Media. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+
+    <!-- ── Lecture audio en arrière-plan (just_audio_background) ────────────── -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- ── Notifications de lecture (Android 13+) ──────────────────────────── -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- ── Partage de fichiers (share_plus / PDF viewer) ────────────────────── -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- ── Vibration (retour tactile clavier personnalisé) ───────────────────── -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!-- ── Modification de la luminosité système (geste vidéo)
+         L'utilisateur doit accorder ce droit dans Paramètres → Apps → spéciales.
+         Sans ce droit, la luminosité s'applique uniquement à l'app. -->
+    <uses-permission android:name="android.permission.WRITE_SETTINGS"
+                     tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:label="omni_explorer"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:requestLegacyExternalStorage="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- ── Service audio en arrière-plan (just_audio_background) ────────── -->
+        <service
+            android:name="com.ryanheise.audioservice.AudioService"
+            android:foregroundServiceType="mediaPlayback"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.media.browse.MediaBrowserService" />
+            </intent-filter>
+        </service>
+
+        <!-- ── Récepteur boutons média (casque, notification) ───────────────── -->
+        <receiver
+            android:name="com.ryanheise.audioservice.MediaButtonReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+
+    <!-- ── Visibilité des packages (Android 11+) ──────────────────────────── -->
+    <queries>
+        <!-- Flutter engine : traitement du texte sélectionné -->
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <!-- url_launcher : ouvrir des liens http/https depuis le Markdown viewer -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="http" />
+        </intent>
+        <!-- share_plus : partage de fichiers PDF -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="application/pdf" />
+        </intent>
+    </queries>
+
+</manifest>
