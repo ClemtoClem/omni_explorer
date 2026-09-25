@@ -140,6 +140,11 @@ echo "org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64" >> ~/.gradle/grad
 flutter config --jdk-dir /usr/lib/jvm/java-21-openjdk-amd64
 ```
 
+- **Linux** : le stockage sécurisé (`flutter_secure_storage`) exige le paquet
+  système `libsecret-1-dev` à la compilation (`sudo apt install
+  libsecret-1-dev`), et un service de trousseau (GNOME Keyring…) à
+  l'exécution.
+
 ### Commandes
 
 ```sh
@@ -741,3 +746,91 @@ Branche : `p0/open-size-limits`
   seront à ajuster après essai sur un téléphone.
 - Les messages (SnackBar) s'affichent l'un après l'autre : un refus peut
   n'apparaître qu'après l'expiration du message précédent.
+
+### P0.7 : secrets hors des préférences, sauvegarde désactivée, clé SSH vérifiée
+
+Branche : `p0/secrets`
+
+**Problèmes**
+- Le **mot de passe SSH** était enregistré **en clair** dans les préférences
+  (SharedPreferences), alors même que le terminal SSH n'est accessible nulle
+  part dans l'application (seul le code mort `text_editor_screen.dart`
+  l'utilise) : l'écran Paramètres le recueillait et le stockait quand même.
+- **Sauvegarde Android** activée par défaut : préférences (donc ce mot de
+  passe), index de la corbeille, etc. partaient dans la sauvegarde cloud et
+  dans le transfert d'un téléphone à l'autre.
+- **Clé d'hôte SSH jamais vérifiée** : sans `onVerifyHostKey`, `dartssh2`
+  accepte n'importe quel serveur. Un serveur intercalé (attaque de l'homme du
+  milieu) aurait reçu le mot de passe sans aucun avertissement.
+
+**Décision** : sur la question « ne plus enregistrer le mot de passe » ou
+« le mettre en stockage sécurisé », le stockage sécurisé a été retenu.
+
+**Modifications**
+- Dépendance `flutter_secure_storage` 10.3.4 : Keystore sur Android, DPAPI
+  sur Windows, Secret Service sur Linux. Elle servira aussi au coffre-fort
+  (P1).
+- `SettingsService` :
+  - le mot de passe SSH est lu et écrit **uniquement** dans le stockage
+    sécurisé ;
+  - **migration** : l'ancienne valeur en clair y est copiée, puis effacée des
+    préférences, et seulement si la copie a réussi ;
+  - si le stockage sécurisé est indisponible, l'ancienne valeur est
+    conservée (pas de perte) et la migration est retentée au lancement
+    suivant ; enregistrer un nouveau mot de passe affiche alors un message ;
+  - chaque accès au stockage sécurisé a un **délai maximal de 5 s** : un
+    stockage qui ne répond pas ne bloque plus le démarrage de l'application ;
+  - le secret n'est jamais journalisé.
+- Android :
+  - `allowBackup="false"` et `fullBackupContent="false"` (Android ≤ 11) ;
+  - `dataExtractionRules` (Android 12+) excluent toutes les données de la
+    sauvegarde cloud **et** du transfert d'appareil à appareil (que
+    `allowBackup` seul ne bloque plus depuis Android 12).
+- SSH, avec « confiance à la première connexion » (TOFU) :
+  - nouveau `ssh_known_hosts.dart`, équivalent de `~/.ssh/known_hosts` :
+    empreintes SHA-256 au format OpenSSH, par hôte et par port ;
+  - nouveau `ssh_host_key_dialog.dart` :
+    - premier contact : l'empreinte est affichée, avec la commande qui
+      permet de la vérifier côté serveur ; l'utilisateur accepte ou refuse ;
+    - clé différente de celle acceptée : connexion **refusée**, avec un
+      avertissement d'interception possible ;
+  - branché sur le panneau SSH (`onVerifyHostKey`). `dartssh2` vérifie de son
+    côté la signature de l'échange avec cette clé, vérifié dans son code ;
+  - Paramètres → VM Debian — SSH : bouton « Oublier la clé du serveur »,
+    pour un serveur réinstallé.
+- Tests : le stockage sécurisé est simulé partout où `SettingsService` est
+  initialisé. Sans cela, les tests restaient bloqués, ce qui a révélé le
+  risque de blocage au démarrage corrigé ci-dessus.
+
+**Validation**
+- 16 nouveaux tests :
+  - `test/core/services/settings_service_ssh_test.dart` (6 tests) : migration
+    puis effacement, valeur vide, lecture existante, écriture jamais en
+    clair, stockage en panne (valeur conservée), stockage muet (démarrage
+    non bloqué) ;
+  - `test/features/text_editor/ssh_known_hosts_test.dart` (6 tests unitaires
+    et 4 tests de widget) : format de l'empreinte, inconnu → accepté →
+    reconnu, clé ou type changé, hôte et port, oubli, données corrompues ;
+    dialogue accepté, refusé, clé connue sans question, clé changée refusée.
+- Tests de mutation : mot de passe en clair non effacé, délai retiré, clé
+  changée reconnue, dialogue qui accepte une clé changée : chacun de ces
+  sabotages fait échouer des tests.
+- `flutter test` : 175 tests réussis (deux exécutions complètes).
+  `flutter analyze` : 0 erreur, 0 avertissement (12 remarques de style
+  préexistantes). `flutter build apk --debug` et `flutter build linux
+  --debug` : réussis.
+
+**Limites et suite**
+- Le **panneau SSH** reste inaccessible (code mort) : le branchement de la
+  vérification de clé n'est testé qu'à travers le dialogue et le service, pas
+  sur une vraie connexion SSH.
+- Sur Linux, le stockage sécurisé suppose un trousseau (GNOME Keyring…)
+  actif ; sinon, le mot de passe n'est pas mémorisé (message), et un ancien
+  mot de passe en clair reste dans les préférences jusqu'à une migration
+  réussie.
+- Désactiver la sauvegarde Android signifie que les réglages ne suivent pas
+  l'utilisateur sur un nouveau téléphone ; un export chiffré, notamment pour
+  le coffre-fort, sera à prévoir.
+- L'Android Lint signalera que `dataExtractionRules` n'a d'effet qu'à partir
+  de l'API 31 : c'est attendu, `allowBackup` couvre les versions
+  antérieures.
