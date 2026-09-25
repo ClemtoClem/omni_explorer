@@ -358,3 +358,90 @@ Branche : `p0/hex-truncation`
   atomique est prévue en P0.5.
 - Le contrôle « fichier modifié ailleurs » ne compare que la taille : une
   modification externe de même taille n'est pas détectée.
+
+### P0.3 : opérations sur les fichiers sans écrasement silencieux
+
+Branche : `p0/file-ops`
+
+**Problèmes**
+- **Le renommage ne fonctionnait pas** : le bouton « Renommer » fermait
+  simplement la boîte de dialogue. La fonction du provider, jamais appelée,
+  aurait de plus écrasé sans avertissement un élément portant déjà le nouveau
+  nom (`File.rename` remplace la cible sous Linux et Android), et acceptait
+  `/` ou `..` dans le nom.
+- **Coller** : en cas de conflit, un suffixe « (copie) » était ajouté
+  d'office, sans laisser le choix. Les erreurs n'étaient que journalisées :
+  l'utilisateur voyait « N élément(s) collé(s) » sans savoir ce qui avait
+  échoué. Les liens symboliques étaient suivis (boucle infinie possible,
+  copie du contenu de leur cible), et une copie ratée laissait un résultat
+  partiel. Couper-coller dans le même dossier renommait l'élément en
+  « x (copie) ».
+- **Créer** un fichier ou un dossier : aucune vérification du nom (`../x`,
+  `a/b`) ; un nom déjà pris n'affichait rien.
+- **Supprimer définitivement la sélection** : au premier échec, une
+  exception non gérée arrêtait l'opération, sans message.
+
+**Modifications**
+- Nouveau `lib/core/services/file_operations_service.dart`, en pur Dart et
+  testable, utilisé par l'explorateur :
+  - `FileNameValidator` : refuse un nom vide, `.`, `..`, `/`, le caractère
+    nul, ou plus de 255 octets ;
+  - `rename` : ne remplace jamais un autre élément ; le changement de casse
+    seule (`a.txt` → `A.txt`) fonctionne, y compris sur les stockages
+    insensibles à la casse ; un lien n'est jamais confondu avec sa cible ;
+  - `transfer` (copier / déplacer) : en cas de conflit, un résolveur décide
+    (ignorer, garder les deux, remplacer). Le remplacement passe par un nom
+    temporaire et n'est jamais destructif : en cas d'échec, l'état d'origine
+    est restauré. Un dossier ne peut pas être copié dans lui-même, même via
+    un lien. Les liens sont copiés en tant que liens. Une copie ratée est
+    retirée. Entre stockages différents, le déplacement se fait par copie
+    puis suppression. Chaque élément produit un bilan (réussi, ignoré,
+    échec avec sa raison) ;
+  - `deletePermanently` : supprime un lien sans toucher à sa cible et
+    rapporte chaque échec ;
+  - les erreurs système sont traduites (permission refusée, stockage plein,
+    lecture seule…).
+- `FileExplorerProvider` passe par ce service. `pasteClipboard` renvoie le
+  bilan ; après un « couper », seuls les éléments en échec restent dans le
+  presse-papiers, pour pouvoir réessayer. `copyTo`, jamais appelé et non
+  sécurisé, est supprimé.
+- Interface (`file_op_dialogs.dart`) :
+  - boîte de conflit : Ignorer / Garder les deux / Remplacer, avec
+    « Appliquer aux éléments suivants » ;
+  - boîte de renommage : l'erreur s'affiche sous le champ sans fermer la
+    boîte, et le nom est présélectionné sans son extension ;
+  - bilan après coller ou supprimer : message court, plus le détail des
+    échecs sur demande (« Détails ») ;
+  - la feuille « Nouveau » affiche l'erreur (nom invalide, élément existant).
+
+**Validation**
+- 48 nouveaux tests :
+  - `test/core/services/file_operations_service_test.dart` (39 tests, sur
+    de vrais dossiers temporaires) : noms refusés, aucun écrasement au
+    renommage (fichier comme dossier vide), changement de casse, lien vs
+    cible, conflits ignorer / garder / remplacer, copie dans le même dossier,
+    dossier dans lui-même (y compris via un lien), liens et boucles de
+    liens, copie ratée nettoyée (fichier rendu illisible), bilan d'erreurs,
+    suppression d'un lien sans toucher sa cible ;
+  - `test/features/file_explorer/file_op_dialogs_test.dart` (5 tests de
+    widget) : dialogues de renommage et de conflit ;
+  - `test/features/file_explorer/file_explorer_provider_ops_test.dart`
+    (4 tests) : presse-papiers après un couper partiellement raté,
+    renommage et création refusés.
+- Test de mutation : en retirant les vérifications de conflit du service,
+  9 tests échouent.
+- `flutter test` : 93 tests réussis. `flutter analyze` : 0 erreur,
+  0 avertissement (12 remarques de style préexistantes).
+- `flutter build apk --debug` : réussi.
+
+**Limites et suite**
+- La mise à la corbeille (menu contextuel et sélection) n'attend pas la fin
+  de l'opération et annonce un succès même en cas d'échec : c'est traité
+  avec la corbeille en P0.4.
+- Les longues copies n'affichent pas de progression et ne peuvent pas être
+  annulées (P3).
+- `core/services/file_service.dart`, l'ancien doublon, n'est plus utilisé
+  que par du code mort (`text_editor_screen.dart`) ; il sera supprimé avec
+  ce code mort en P2.
+- Sur un stockage qui ne gère pas les liens symboliques (carte SD en
+  exFAT), copier un lien échoue ; l'échec est rapporté dans le bilan.
