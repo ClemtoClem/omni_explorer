@@ -29,7 +29,9 @@ void setUpEditorTest() {
 Future<void> settleIo(
   WidgetTester tester, {
   bool Function()? until,
-  Duration timeout = const Duration(seconds: 10),
+  // Plafond seulement : l'attente s'arrête dès que [until] est vrai. Sous
+  // forte charge (suites lancées en parallèle), 10 s ne suffisaient pas.
+  Duration timeout = const Duration(seconds: 30),
 }) async {
   const step = Duration(milliseconds: 20);
   final maxRounds = until == null ? 20 : timeout.inMilliseconds ~/ 20;

@@ -76,7 +76,13 @@ void main() {
     await tester.enterText(find.byKey(const Key('entry-username')), 'clement');
     await tester.enterText(find.byKey(const Key('entry-password')), 'S3cr3t!');
     await tester.tap(find.byTooltip('Enregistrer'));
-    await settleIo(tester, until: () => session.entries.isNotEmpty);
+    // Attendre la fermeture réelle de l'écran d'édition, pas seulement
+    // l'enregistrement : sinon son champ (qui contient le mot de passe) est
+    // encore à l'écran.
+    await settleIo(tester,
+        until: () =>
+            session.entries.isNotEmpty &&
+            find.byKey(const Key('entry-title')).evaluate().isEmpty);
     await tester.pumpAndSettle();
     expect(find.text('Banque'), findsOneWidget);
     expect(find.text('clement'), findsOneWidget);
