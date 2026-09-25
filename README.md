@@ -290,8 +290,9 @@ l'extraction venait d'échouer.
   concurrence théorique (un autre processus modifiant la destination pendant
   l'extraction) ; elle est acceptable pour une application mobile
   mono-utilisateur.
-- Les fichiers déjà présents dans la destination sont encore écrasés sans
-  confirmation : c'est la gestion des conflits, prévue en P0.3.
+- Les fichiers déjà présents dans la destination étaient encore écrasés sans
+  confirmation. Annoncé ici pour P0.3, cela a finalement été corrigé en P0.5
+  (voir cette section).
 - Les archives sont toujours chargées entièrement en mémoire : c'est le
   streaming, prévu en P2.
 
@@ -546,3 +547,102 @@ Branche : `p0/trash`
   (la logique l'est par les tests du service).
 - Les éléments orphelins ne peuvent pas être restaurés vers un dossier
   choisi.
+
+### P0.5 : écritures atomiques et plus aucun écrasement silencieux
+
+Branche : `p0/atomic-writes`
+
+**Problèmes**
+- **Éditeur** (texte, code, Markdown, texte enrichi et son fichier `.fmt`,
+  hexadécimal) et **réglages d'espace de travail** : sauvegarde directe dans
+  le fichier. Si l'application était tuée ou le stockage plein pendant
+  l'écriture, le fichier restait **tronqué**.
+- **Archives** :
+  - changer ou retirer le mot de passe **supprimait l'archive d'origine
+    avant** de mettre la nouvelle en place : une interruption faisait perdre
+    l'archive. Le nom temporaire fixe `x.zip.tmp` écrasait en plus un
+    éventuel fichier de ce nom ;
+  - ajouter ou retirer des fichiers d'un ZIP réécrivait l'archive
+    directement ;
+  - si l'encodage échouait, rien n'était écrit, sans aucune erreur.
+- **Extraction** : un fichier déjà présent dans la destination était
+  **écrasé sans rien demander**, et 7z/RAR utilisaient `-y` (tout écraser).
+  La section P0.1 annonçait cette correction pour P0.3, mais elle n'y avait
+  pas été faite.
+- **Création d'archive** : une archive du même nom était écrasée (ZIP,
+  TAR.GZ). Avec 7z (et le ZIP chiffré, qui passe par 7z), `7z a` **ajoutait**
+  les fichiers à l'archive existante, ce qui mélangeait deux contenus. Le
+  nom saisi n'était pas validé.
+
+**Modifications**
+- `lib/core/utils/atomic_write.dart` (créé en P0.4) : écriture dans un
+  temporaire du même dossier, vidage sur disque (`flush`), puis renommage
+  atomique. Il préserve désormais :
+  - les **permissions** : un script exécutable ou un fichier privé les
+    garde. Vérifié : `File.copy` conserve les permissions, le temporaire
+    n'est donc recréé par copie que lorsqu'elles diffèrent ;
+  - les **liens symboliques** : on écrit dans la cible du lien (chaînes
+    comprises), et le lien reste un lien ;
+  - si le dossier interdit de créer le temporaire alors que le fichier est
+    modifiable (cas rare), l'écriture se fait directement dans le fichier,
+    comme avant, plutôt que d'empêcher la sauvegarde.
+- Éditeur (texte, `.fmt`, hex) et réglages d'espace de travail : sauvegarde
+  via `AtomicWrite`.
+- `ArchiveService` :
+  - extraction : en cas de conflit, la même boîte de dialogue que dans
+    l'explorateur (Ignorer / Garder les deux / Remplacer) ; sans choix, les
+    deux sont gardés ; un dossier n'est jamais remplacé par un fichier ;
+    chaque fichier est écrit de façon atomique ; 7z utilise `-aou` et unrar
+    `-or` (renommage automatique) ; le bilan (`ExtractResult.notes`) indique
+    les fichiers renommés ou ignorés ;
+  - création : refus d'écraser ou de compléter une archive existante ; le
+    nom saisi est validé ; les archives produites par 7z sont écrites sous un
+    nom temporaire puis renommées ;
+  - modification ZIP et mot de passe : le nouveau fichier est produit à part,
+    puis remplace l'original **d'un coup**, sans suppression préalable ;
+  - un échec d'encodage lève une erreur.
+- Les dialogues d'opérations sur les fichiers (conflit, renommage, bilan)
+  sont déplacés de `features/file_explorer/widgets/` vers `lib/core/widgets/`
+  : ils servent désormais à l'explorateur, aux paramètres et aux archives.
+
+**Validation**
+- 20 nouveaux tests :
+  - `test/core/utils/atomic_write_test.dart` (9 tests) : création,
+    remplacement, permissions 750 et 600, lien et chaîne de liens, cycle de
+    liens, échec du renommage (cible intacte, aucun temporaire), dossier non
+    modifiable ;
+  - `test/features/text_editor/unified_editor_save_test.dart` (3 tests de
+    widget sur l'éditeur réel) : sauvegarde sans temporaire, fichier ouvert
+    via un lien qui reste un lien, permissions conservées ;
+  - `test/features/archive/archive_service_test.dart` (8 tests ajoutés) :
+    conflits à l'extraction (garder les deux par défaut, ignorer, remplacer,
+    dossier jamais remplacé, `.gz`), refus d'écraser à la création,
+    création / ajout / retrait ZIP sans temporaire restant.
+- Tests de mutation : liens non résolus, permissions non conservées,
+  remplacement par défaut à l'extraction, écrasement autorisé à la
+  création : chacun de ces sabotages fait échouer des tests.
+- Les attentes des tests de l'éditeur reposent désormais sur une condition
+  (onglet ouvert, sauvegarde terminée) plutôt que sur une durée fixe. Un
+  échec isolé était apparu une fois pendant les tests de mutation, sans que
+  je puisse le reproduire ensuite ; la durée fixe, dépendante de la charge,
+  en était la cause la plus probable.
+- `flutter test` : 135 tests réussis (deux exécutions complètes).
+  `flutter analyze` : 0 erreur, 0 avertissement (12 remarques de style
+  préexistantes). `flutter build apk --debug` : réussi.
+
+**Limites et suite**
+- L'atomicité de la sauvegarde **dans l'éditeur** est vérifiée par les tests
+  d'`AtomicWrite` et par relecture, mais pas de bout en bout : simuler un
+  stockage plein ou un arrêt brutal en pleine écriture n'est pas faisable
+  ici.
+- 7z et RAR ne sont pas installés sur la machine de développement : les
+  options `-aou` et `-or` et la création via 7z ne sont pas testées.
+- Les autres liens physiques (« hard links ») vers un fichier gardent
+  l'ancien contenu après une sauvegarde, et le propriétaire du fichier n'est
+  pas conservé.
+- **Défaut découvert, à traiter en P1.2 (éditeur de code)** : à chaque
+  ouverture d'un onglet de code, `CodeEditor.initState` déclenche une
+  notification du contrôleur, et l'écouteur d'autocomplétion appelle alors
+  `setState` pendant la construction de l'écran. En debug, cela produit une
+  erreur rouge (« setState() called during build ») ; en release, l'écran
+  est reconstruit inutilement.
