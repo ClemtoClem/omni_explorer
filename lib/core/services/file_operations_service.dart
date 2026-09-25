@@ -16,6 +16,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import '../utils/file_naming.dart';
+
 /// Erreur d'une opération unitaire, avec un message destiné à l'utilisateur.
 class FileOpException implements Exception {
   final String message;
@@ -36,7 +38,7 @@ class PartialMoveException extends FileOpException {
 
 /// Décision quand la destination existe déjà.
 enum ConflictAction {
-  /// Garder les deux : la copie reçoit un nom libre (« x (copie).txt »).
+  /// Garder les deux : l'élément reçoit un nom libre (« x.1.txt »).
   keepBoth,
 
   /// Remplacer l'élément existant.
@@ -163,7 +165,7 @@ class FileOperationsService {
   ///
   /// En cas de conflit, [onConflict] décide ; sans résolveur, les deux
   /// éléments sont gardés. Copier un élément dans son propre dossier crée
-  /// toujours une copie nommée « (copie) ».
+  /// toujours une duplication nommée « x.copy.1.txt ».
   Future<FileOpReport> transfer(
     List<String> sources,
     String destDir, {
@@ -198,13 +200,35 @@ class FileOperationsService {
     // Déplacer vers son propre dossier : rien à faire.
     if (move && p.equals(p.dirname(src), destDir)) return false;
     final dest = p.join(destDir, p.basename(src));
-    // Copie dans le même dossier : toujours une nouvelle copie, sans demander.
-    final sameEntry = p.equals(dest, src);
-    final placed = await relocate(src, dest,
-        move: move,
-        onConflict:
-            sameEntry ? (_, __) async => ConflictAction.keepBoth : onConflict);
+    // Copie dans le même dossier : c'est une duplication (« x.copy.1.txt »),
+    // sans question.
+    if (p.equals(dest, src)) {
+      await relocate(src, duplicateDestination(src), move: false);
+      return true;
+    }
+    final placed =
+        await relocate(src, dest, move: move, onConflict: onConflict);
     return placed != null;
+  }
+
+  /// Duplique chaque élément de [paths] dans son propre dossier
+  /// (« rapport.copy.1.txt »…).
+  Future<FileOpReport> duplicate(List<String> paths) async {
+    final report = FileOpReport();
+    for (final path in paths) {
+      try {
+        if (_typeOf(path) == FileSystemEntityType.notFound) {
+          throw const FileOpException('élément introuvable');
+        }
+        await relocate(path, duplicateDestination(path), move: false);
+        report.succeeded.add(path);
+      } on FileOpException catch (e) {
+        report.failures.add(FileOpFailure(path, e.message));
+      } on FileSystemException catch (e) {
+        report.failures.add(FileOpFailure(path, _reason(e)));
+      }
+    }
+    return report;
   }
 
   /// Copie ou déplace [src] vers le chemin exact [dest].
@@ -376,23 +400,30 @@ class FileOperationsService {
 
   // ── Noms ──────────────────────────────────────────────────────────────────
 
-  /// Premier chemin libre dans [dir] pour [name] : « x (copie).txt »,
-  /// « x (copie 2).txt »… Avec [keepExtension] à `false` (dossiers), le
-  /// suffixe va à la fin : « photos.2023 (copie) ».
+  /// Premier chemin libre dans [dir] pour [name], en cas de conflit :
+  /// « x.1.txt », « x.2.txt »… Avec [keepExtension] à `false` (dossiers), le
+  /// numéro va à la fin : « photos.1 ». Voir [FileNaming].
   static String uniqueDestination(String dir, String name,
       {bool keepExtension = true}) {
-    var dest = p.join(dir, name);
+    final dest = p.join(dir, name);
     if (_typeOf(dest) == FileSystemEntityType.notFound) return dest;
-    // « .bashrc » n'a pas d'extension, « .config.json » a « .json ».
-    final hasExt =
-        keepExtension && (!name.startsWith('.') || name.indexOf('.', 1) > 0);
-    final ext = hasExt ? p.extension(name) : '';
-    final base = name.substring(0, name.length - ext.length);
-    for (var i = 1;; i++) {
-      final suffix = i == 1 ? ' (copie)' : ' (copie $i)';
-      dest = p.join(dir, '$base$suffix$ext');
-      if (_typeOf(dest) == FileSystemEntityType.notFound) return dest;
-    }
+    return p.join(
+        dir,
+        FileNaming.numbered(
+            name,
+            (c) => _typeOf(p.join(dir, c)) != FileSystemEntityType.notFound,
+            isDirectory: !keepExtension));
+  }
+
+  /// Chemin de la copie de [path] dans son propre dossier :
+  /// « rapport.copy.1.txt », « rapport.copy.2.txt »…
+  static String duplicateDestination(String path) {
+    final dir = p.dirname(path);
+    return p.join(
+        dir,
+        FileNaming.copy(p.basename(path),
+            (c) => _typeOf(p.join(dir, c)) != FileSystemEntityType.notFound,
+            isDirectory: _typeOf(path) == FileSystemEntityType.directory));
   }
 
   static String _freeTempPath(String dir, String name) {

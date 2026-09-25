@@ -155,7 +155,7 @@ void main() {
       await ops.transfer([p.join(a, 'f.txt')], b, move: false);
 
       expect(read(p.join(b, 'f.txt')), 'ancien');
-      expect(read(p.join(b, 'f (copie).txt')), 'nouveau');
+      expect(read(p.join(b, 'f.1.txt')), 'nouveau');
     });
 
     test('conflit « ignorer »', () async {
@@ -207,7 +207,7 @@ void main() {
       });
 
       expect(asked, isFalse);
-      expect(names(a), ['f (copie).txt', 'f.txt']);
+      expect(names(a), ['f.copy.1.txt', 'f.txt']);
     });
 
     test('déplacer dans son propre dossier ne fait rien', () async {
@@ -355,22 +355,59 @@ void main() {
   });
 
   group('uniqueDestination', () {
-    test('suffixes successifs', () {
+    test('conflit : point et numéro avant l\'extension', () {
       write(p.join(a, 'f.txt'), '');
-      write(p.join(a, 'f (copie).txt'), '');
+      write(p.join(a, 'f.1.txt'), '');
       expect(FileOperationsService.uniqueDestination(a, 'f.txt'),
-          p.join(a, 'f (copie 2).txt'));
+          p.join(a, 'f.2.txt'));
     });
 
     test('fichiers cachés et dossiers', () async {
       write(p.join(a, '.bashrc'), '');
       await Directory(p.join(a, 'photos.2023')).create();
       expect(FileOperationsService.uniqueDestination(a, '.bashrc'),
-          p.join(a, '.bashrc (copie)'));
+          p.join(a, '.bashrc.1'));
       expect(
           FileOperationsService.uniqueDestination(a, 'photos.2023',
               keepExtension: false),
-          p.join(a, 'photos.2023 (copie)'));
+          p.join(a, 'photos.2023.1'));
+    });
+  });
+
+  group('dupliquer', () {
+    test('fichier : .copy.N, numéro suivant à chaque duplication', () async {
+      write(p.join(a, 'rapport.txt'), 'r');
+
+      await ops.duplicate([p.join(a, 'rapport.txt')]);
+      await ops.duplicate([p.join(a, 'rapport.txt')]);
+      // Dupliquer une copie reprend la numérotation de l'original.
+      await ops.duplicate([p.join(a, 'rapport.copy.1.txt')]);
+
+      expect(names(a), [
+        'rapport.copy.1.txt',
+        'rapport.copy.2.txt',
+        'rapport.copy.3.txt',
+        'rapport.txt',
+      ]);
+      expect(read(p.join(a, 'rapport.copy.3.txt')), 'r');
+    });
+
+    test('dossier avec son contenu, et archive à double extension', () async {
+      await Directory(p.join(a, 'projet')).create();
+      write(p.join(a, 'projet', 'main.dart'), 'code');
+      write(p.join(a, 'site.tar.gz'), 'x');
+
+      final r =
+          await ops.duplicate([p.join(a, 'projet'), p.join(a, 'site.tar.gz')]);
+
+      expect(r.succeeded.length, 2);
+      expect(read(p.join(a, 'projet.copy.1', 'main.dart')), 'code');
+      expect(File(p.join(a, 'site.copy.1.tar.gz')).existsSync(), isTrue);
+    });
+
+    test('élément disparu : rapporté', () async {
+      final r = await ops.duplicate([p.join(a, 'absent')]);
+      expect(r.failures.length, 1);
     });
   });
 }

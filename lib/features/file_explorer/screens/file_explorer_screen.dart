@@ -482,6 +482,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
               ),
               SizedBox(
                 width: 58,
+                child: _selBtn(Icons.control_point_duplicate_rounded, 'Dupliquer',
+                    () => _duplicateSelected(prov)),
+              ),
+              SizedBox(
+                width: 58,
                 child: _selBtn(Icons.cut_rounded, 'Déplacer', () => _moveSelected(ctx, prov)),
               ),
               SizedBox(
@@ -612,6 +617,12 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     final report = await prov.deletePermanently(prov.selected.toList());
     prov.clearSelection();
     if (mounted) showFileOpReport(context, report, verb: 'supprimé(s)');
+  }
+
+  Future<void> _duplicateSelected(FileExplorerProvider prov) async {
+    final report = await prov.duplicate(prov.selected.toList());
+    prov.clearSelection();
+    if (mounted) showFileOpReport(context, report, verb: 'dupliqué(s)');
   }
 
   void _copySelected(BuildContext ctx, FileExplorerProvider prov) {

@@ -181,7 +181,7 @@ void main() {
 
       expect(r.keptBoth, 1);
       expect(File(p.join(dest, 'a.txt')).readAsStringSync(), 'existant');
-      expect(File(p.join(dest, 'a (copie).txt')).readAsStringSync(), 'archive');
+      expect(File(p.join(dest, 'a.1.txt')).readAsStringSync(), 'archive');
     });
 
     test('« ignorer »', () async {
@@ -218,7 +218,7 @@ void main() {
           onConflict: (_, __) async => ConflictAction.replace);
 
       expect(Directory(p.join(dest, 'a.txt')).existsSync(), isTrue);
-      expect(File(p.join(dest, 'a (copie).txt')).existsSync(), isTrue);
+      expect(File(p.join(dest, 'a.1.txt')).existsSync(), isTrue);
     });
 
     test('.gz : conflit « ignorer »', () async {

@@ -181,6 +181,8 @@ class _ContextMenuBtn extends StatelessWidget {
             child: _MenuItem(Icons.drive_file_rename_outline_rounded, 'Renommer')),
         const PopupMenuItem(value: _ContextAction.copy,
             child: _MenuItem(Icons.copy_rounded, 'Copier')),
+        const PopupMenuItem(value: _ContextAction.duplicate,
+            child: _MenuItem(Icons.control_point_duplicate_rounded, 'Dupliquer')),
         const PopupMenuItem(value: _ContextAction.cut,
             child: _MenuItem(Icons.cut_rounded, 'Couper')),
         const PopupMenuItem(
@@ -250,6 +252,10 @@ class _ContextMenuBtn extends StatelessWidget {
           SnackBar(content: Text('« ${item.name} » copié — collez-le ailleurs')));
         break;
 
+      case _ContextAction.duplicate:
+        _duplicate(ctx);
+        break;
+
       case _ContextAction.cut:
         ctx.read<FileExplorerProvider>().cutToClipboard([item.path]);
         ScaffoldMessenger.of(ctx).showSnackBar(
@@ -260,6 +266,11 @@ class _ContextMenuBtn extends StatelessWidget {
         showFilePropertiesDialog(ctx, item);
         break;
     }
+  }
+
+  Future<void> _duplicate(BuildContext ctx) async {
+    final report = await ctx.read<FileExplorerProvider>().duplicate([item.path]);
+    if (ctx.mounted) showFileOpReport(ctx, report, verb: 'dupliqué(s)');
   }
 
   Future<void> _moveToTrash(BuildContext ctx) async {
@@ -342,7 +353,7 @@ class _ContextMenuBtn extends StatelessWidget {
 }
 
 enum _ContextAction {
-  open, rename, copy, cut, trash, shortcut,
+  open, rename, copy, duplicate, cut, trash, shortcut,
   extractHere, extractTo, compress, addToPlaylist, properties, editVideo,
 }
 

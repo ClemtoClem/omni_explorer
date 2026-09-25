@@ -381,6 +381,13 @@ class FileExplorerProvider extends ChangeNotifier {
     await _loadEntries();
   }
 
+  /// Duplique [paths] dans leur propre dossier (« x.copy.1.txt »).
+  Future<FileOpReport> duplicate(Iterable<String> paths) async {
+    final report = await _ops.duplicate(paths.toList());
+    await _loadEntries();
+    return report;
+  }
+
   /// Supprime définitivement [paths] (sans corbeille).
   Future<FileOpReport> deletePermanently(Iterable<String> paths) async {
     final report = await _ops.deletePermanently(paths.toList());

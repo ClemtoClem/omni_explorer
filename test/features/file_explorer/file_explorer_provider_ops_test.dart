@@ -59,7 +59,7 @@ void main() {
 
     expect(prov.clipboardCount, 1);
     expect(File(p.join(b, 'f.txt')).existsSync(), isTrue);
-    expect(File(p.join(b, 'f (copie).txt')).existsSync(), isTrue);
+    expect(File(p.join(b, 'f.1.txt')).existsSync(), isTrue);
   });
 
   test('renommer vers un nom existant est refusé', () async {

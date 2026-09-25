@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 
 import '../../app/theme/app_theme.dart';
 import '../services/file_operations_service.dart';
+import '../utils/file_naming.dart';
 
 /// Résolveur de conflits qui interroge l'utilisateur, avec une option
 /// « appliquer aux éléments suivants » valable pour toute l'opération.
@@ -41,6 +42,13 @@ class _ConflictDialogState extends State<_ConflictDialog> {
   void _pick(ConflictAction action) =>
       Navigator.pop(context, (action, _applyToAll));
 
+  /// Forme du nom proposé : « rapport.N.txt ».
+  String _numberedExample() {
+    final (base, ext) =
+        FileNaming.split(p.basename(widget.destination), isDirectory: false);
+    return '$base.N$ext';
+  }
+
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
@@ -68,7 +76,7 @@ class _ConflictDialogState extends State<_ConflictDialog> {
         ),
         TextButton(
           onPressed: () => _pick(ConflictAction.keepBoth),
-          child: const Text('Garder les deux'),
+          child: Text('Renommer (${_numberedExample()})'),
         ),
         TextButton(
           onPressed: () => _pick(ConflictAction.replace),
