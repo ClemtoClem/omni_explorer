@@ -13,7 +13,7 @@ import '../../../core/services/app_state_service.dart';
 import '../../../core/services/permissions_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
-import '../../file_explorer/widgets/file_op_dialogs.dart';
+import '../../../core/widgets/file_op_dialogs.dart';
 import 'font_settings_screen.dart';
 import 'theme_picker_screen.dart';
 

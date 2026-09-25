@@ -27,7 +27,7 @@ import '../providers/file_explorer_provider.dart';
 import '../widgets/file_list_item.dart';
 import '../widgets/file_grid_item.dart';
 import '../widgets/path_bar.dart';
-import '../widgets/file_op_dialogs.dart';
+import '../../../core/widgets/file_op_dialogs.dart';
 import '../widgets/filter_bar.dart';
 import '../widgets/shortcut_panel.dart';
 

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:omni_explorer/core/services/file_operations_service.dart';
-import 'package:omni_explorer/features/file_explorer/widgets/file_op_dialogs.dart';
+import 'package:omni_explorer/core/widgets/file_op_dialogs.dart';
 
 void main() {
   /// Application minimale : un bouton qui exécute [onPressed].

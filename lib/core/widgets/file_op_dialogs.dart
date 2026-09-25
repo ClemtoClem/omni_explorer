@@ -5,8 +5,8 @@
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
-import '../../../app/theme/app_theme.dart';
-import '../../../core/services/file_operations_service.dart';
+import '../../app/theme/app_theme.dart';
+import '../services/file_operations_service.dart';
 
 /// Résolveur de conflits qui interroge l'utilisateur, avec une option
 /// « appliquer aux éléments suivants » valable pour toute l'opération.

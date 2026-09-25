@@ -12,7 +12,7 @@ import '../../../core/services/file_operations_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
 import '../../../app/theme/app_theme.dart';
-import 'file_op_dialogs.dart';
+import '../../../core/widgets/file_op_dialogs.dart';
 
 /// @class ShortcutPanel
 /// @brief Drawer affichant les emplacements prédéfinis et les raccourcis utilisateur.

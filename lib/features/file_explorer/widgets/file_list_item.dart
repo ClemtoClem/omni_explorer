@@ -17,7 +17,7 @@ import '../../../features/archive/services/archive_service.dart';
 import '../../../features/media_player/providers/media_player_provider.dart';
 import '../../../features/video_editor/screens/video_editor_screen.dart';
 import '../providers/file_explorer_provider.dart';
-import 'file_op_dialogs.dart';
+import '../../../core/widgets/file_op_dialogs.dart';
 import 'file_properties_dialog.dart';
 
 /// @class FileListItem
