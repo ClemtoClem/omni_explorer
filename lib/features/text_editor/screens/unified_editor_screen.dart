@@ -41,6 +41,7 @@ import '../widgets/terminal_panel.dart';
 import '../completions/language_completions.dart';
 import '../models/workspace_settings.dart';
 import '../services/editor_intelligence.dart';
+import '../services/hex_file_io.dart';
 import '../services/workspace_service.dart';
 import 'workspace_settings_screen.dart';
 
@@ -48,7 +49,6 @@ import 'workspace_settings_screen.dart';
 
 enum EditorViewMode { code, markdown, text, richText, hex }
 
-const int _hexMaxBytes = 32 * 1024 * 1024;
 const int _hexBytesPerRow = 8;
 
 // ─── Formatage texte enrichi ──────────────────────────────────────────────────
@@ -241,7 +241,8 @@ class _UTab {
   Uint8List? bytes;
   int hexSelectedOffset;
   bool hexModified;
-  bool hexTruncated;
+  /// Taille du fichier sur le disque au chargement des octets.
+  int hexFileLength;
   TextEditingController? hexInputCtrl;
   FocusNode? hexInputFocus;
   ScrollController? hexScrollCtrl;
@@ -255,11 +256,15 @@ class _UTab {
   })  : showMdPreview = viewMode == EditorViewMode.markdown,
         hexSelectedOffset = -1,
         hexModified = false,
-        hexTruncated = false {
+        hexFileLength = 0 {
     _init();
   }
 
   String get name => p.basename(path);
+
+  /// Vrai si seul le début du fichier est chargé en hexadécimal : l'onglet
+  /// doit alors rester en lecture seule.
+  bool get hexTruncated => bytes != null && bytes!.length < hexFileLength;
 
   void _init() {
     switch (viewMode) {
@@ -534,7 +539,10 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     if (mode == EditorViewMode.hex) {
       tab = _UTab(
           path: path, content: '', isReadOnly: true, viewMode: mode, lang: lang);
-      await _loadHexBytes(tab, path);
+      if (!await _loadHexBytes(tab, path)) {
+        tab.dispose();
+        return;
+      }
     } else {
       String content = '';
       try {
@@ -590,17 +598,20 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     }
   }
 
-  Future<void> _loadHexBytes(_UTab tab, String path) async {
+  /// Charge (ou recharge depuis le disque) les octets de [tab].
+  /// Retourne `false` si la lecture a échoué (erreur déjà affichée).
+  Future<bool> _loadHexBytes(_UTab tab, String path) async {
     try {
-      final all = await File(path).readAsBytes();
-      if (all.length > _hexMaxBytes) {
-        tab.bytes = Uint8List.fromList(all.sublist(0, _hexMaxBytes));
-        tab.hexTruncated = true;
-      } else {
-        tab.bytes = Uint8List.fromList(all);
-      }
+      final loaded = await HexFileIO.load(path);
+      tab.bytes = loaded.bytes;
+      tab.hexFileLength = loaded.fileLength;
+      tab.hexSelectedOffset = -1;
+      tab.hexModified = false;
+      if (loaded.isTruncated) tab.isReadOnly = true;
+      return true;
     } catch (e) {
       _showErr('Lecture hex impossible : $e');
+      return false;
     }
   }
 
@@ -630,9 +641,17 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     if (tab.viewMode == EditorViewMode.hex) {
       if (tab.bytes == null || !tab.hexModified) return;
       try {
-        await File(tab.path).writeAsBytes(tab.bytes!, flush: true);
-        if (mounted) setState(() => tab.hexModified = false);
+        await HexFileIO.save(tab.path, tab.bytes!,
+            loadedFileLength: tab.hexFileLength);
+        if (mounted) {
+          setState(() {
+            tab.hexModified = false;
+            tab.isDirty = false;
+          });
+        }
         _snack('Fichier sauvegardé');
+      } on HexSaveRefused catch (e) {
+        _showErr(e.message);
       } catch (e) {
         _showErr('Sauvegarde hex impossible : $e');
       }
@@ -698,21 +717,86 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   }
 
   void _enableEdit(int idx) {
-    if (_p.tabs[idx].isReadOnly) setState(() => _p.tabs[idx].isReadOnly = false);
+    final tab = _p.tabs[idx];
+    if (tab.viewMode == EditorViewMode.hex && tab.hexTruncated) {
+      _snack('Fichier trop volumineux : seul le début est affiché, '
+          'en lecture seule.');
+      return;
+    }
+    if (tab.isReadOnly) setState(() => tab.isReadOnly = false);
   }
 
-  void _switchViewMode(EditorViewMode mode) {
+  /// Change la représentation de l'onglet actif.
+  ///
+  /// Entre modes texte (code, markdown, texte, enrichi), le texte en cours est
+  /// transmis tel quel. Vers ou depuis l'hexadécimal, le contenu est RELU
+  /// depuis le disque : texte et octets ne sont pas synchronisés en mémoire,
+  /// et réutiliser l'un pour l'autre afficherait un document vide ou périmé
+  /// qui, une fois sauvegardé, écraserait le fichier. Les modifications non
+  /// sauvegardées doivent donc l'être avant ce changement.
+  Future<void> _switchViewMode(EditorViewMode mode) async {
     final tab = _p.activeTab;
     if (tab == null || tab.viewMode == mode) return;
-    final cur = switch (tab.viewMode) {
-      EditorViewMode.code || EditorViewMode.markdown =>
-        tab.codeCtrl?.text ?? tab.content,
-      EditorViewMode.text => tab.textCtrl?.text ?? tab.content,
-      EditorViewMode.richText => tab.richCtrl?.text ?? tab.content,
-      _ => tab.content,
-    };
+    final fromHex = tab.viewMode == EditorViewMode.hex;
+    final toHex = mode == EditorViewMode.hex;
+
+    if (!fromHex && !toHex) {
+      final cur = switch (tab.viewMode) {
+        EditorViewMode.code || EditorViewMode.markdown =>
+          tab.codeCtrl?.text ?? tab.content,
+        EditorViewMode.text => tab.textCtrl?.text ?? tab.content,
+        EditorViewMode.richText => tab.richCtrl?.text ?? tab.content,
+        _ => tab.content,
+      };
+      setState(() {
+        tab.content = cur;
+        tab.switchMode(mode);
+        _attachListeners(tab);
+        _syncKb();
+      });
+      return;
+    }
+
+    if (tab.isDirty || tab.hexModified) {
+      _showErr('Sauvegardez d\'abord vos modifications : le passage '
+          '${toHex ? 'en ' : 'depuis l\''}hexadécimal relit le fichier sur '
+          'le disque.');
+      return;
+    }
+
+    if (toHex) {
+      if (!await _loadHexBytes(tab, tab.path) || !mounted) return;
+      setState(() {
+        tab.content = '';
+        tab.switchMode(mode);
+        _syncKb();
+      });
+      return;
+    }
+
+    // Depuis l'hexadécimal vers un mode texte : relire le texte.
+    // Lecture et décodage séparés : readAsString signale un décodage raté
+    // par une FileSystemException, indiscernable d'une erreur d'accès.
+    final List<int> raw;
+    try {
+      raw = await File(tab.path).readAsBytes();
+    } on FileSystemException catch (e) {
+      _showErr('Lecture impossible : ${e.message}');
+      return;
+    }
+    final String text;
+    try {
+      text = utf8.decode(raw);
+    } on FormatException {
+      _showErr('Ce fichier n\'est pas du texte UTF-8 : il reste affiché en '
+          'hexadécimal.');
+      return;
+    }
+    if (!mounted) return;
     setState(() {
-      tab.content = cur;
+      tab.content = text;
+      tab.bytes = null; // libère le tampon binaire
+      tab.hexFileLength = 0;
       tab.switchMode(mode);
       _attachListeners(tab);
       _syncKb();
@@ -1715,6 +1799,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       children: [
         Column(
           children: [
+            if (tab.hexTruncated) _buildHexTruncatedBanner(tab, theme),
             _buildHexHeader(theme),
             const Divider(height: 1),
             Expanded(
@@ -1738,6 +1823,30 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
             child: _buildHexEditBar(tab, theme),
           ),
       ],
+    );
+  }
+
+  /// Bandeau affiché quand seul le début d'un gros fichier est chargé.
+  Widget _buildHexTruncatedBanner(_UTab tab, ThemeData theme) {
+    return Container(
+      width: double.infinity,
+      color: AppColors.warning.withValues(alpha: 0.15),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          const Icon(Icons.lock_outline_rounded,
+              size: 16, color: AppColors.warning),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Aperçu des ${FileUtils.formatSize(tab.bytes!.length)} premiers '
+              'sur ${FileUtils.formatSize(tab.hexFileLength)} : '
+              'lecture seule pour ne pas tronquer le fichier.',
+              style: theme.textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
