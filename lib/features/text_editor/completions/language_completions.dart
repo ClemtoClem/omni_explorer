@@ -107,7 +107,7 @@ class LanguageCompletions {
       'Uint8List', 'ByteData', 'RegExp', 'Comparable', 'Pattern',
       // Flutter
       'Widget', 'StatefulWidget', 'StatelessWidget', 'BuildContext',
-      'BuildContext', 'State', 'Key', 'UniqueKey', 'ValueKey', 'GlobalKey',
+      'State', 'Key', 'UniqueKey', 'ValueKey', 'GlobalKey',
       'Scaffold', 'AppBar', 'Container', 'Row', 'Column', 'Stack', 'Expanded',
       'Flexible', 'Padding', 'SizedBox', 'Center', 'Align', 'Text', 'Icon',
       'Image', 'ListView', 'GridView', 'SingleChildScrollView', 'Scrollbar',
@@ -122,8 +122,8 @@ class LanguageCompletions {
       'initState', 'dispose', 'build', 'mounted', 'widget', 'super',
       'override', 'const', 'final', 'late',
       // Dart stdlib
-      'print', 'identical', 'identical', 'hashCode', 'toString', 'runtimeType',
-      'jsonDecode', 'jsonEncode', 'jsonDecode', 'File', 'Directory', 'Process',
+      'print', 'identical', 'hashCode', 'toString', 'runtimeType',
+      'jsonDecode', 'jsonEncode', 'File', 'Directory', 'Process',
       'Platform', 'path', 'basename', 'dirname', 'extension', 'join',
     ],
 
@@ -278,6 +278,15 @@ class LanguageCompletions {
       'selected', 'multiple', 'target', 'rel', 'action', 'method', 'enctype',
       'for', 'data-', 'aria-label', 'aria-hidden', 'role', 'tabindex',
       'width', 'height', 'lang', 'charset', 'content', 'viewport',
+    ],
+
+    // ── XML ──────────────────────────────────────────────────────────────────
+    'xml': [
+      // Common declarations and structures
+      'xml', 'version', 'encoding', 'standalone', 'DOCTYPE', 'element',
+      'attlist', 'entity', 'notation', 'cdata', 'xsl', 'stylesheet',
+      'template', 'value-of', 'for-each', 'if', 'choose', 'when', 'otherwise',
+      'call-template', 'param', 'with-param', 'variable', 'apply-templates',
     ],
 
     // ── CSS ──────────────────────────────────────────────────────────────────
