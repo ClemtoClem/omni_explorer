@@ -114,33 +114,44 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
   Future<void> _extractAll() async {
     final dest = await _pickDestDir();
     if (dest == null) return;
-    await _runOp(() => ArchiveService.extractAll(
-      widget.archivePath, dest,
-      password: _password,
-      onProgress: (v) => setState(() => _operationProgress = v),
-    ));
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Extrait dans $dest')));
+    var result = const ExtractResult();
+    final ok = await _runOp(() async {
+      result = await ArchiveService.extractAll(
+        widget.archivePath, dest,
+        password: _password,
+        onProgress: (v) => setState(() => _operationProgress = v),
+      );
+    });
+    if (ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Extrait dans $dest${_skippedLinksNote(result)}')));
     }
   }
+
+  /// Mention ajoutée au message de succès quand des liens ont été ignorés.
+  static String _skippedLinksNote(ExtractResult r) => r.skippedLinks == 0
+      ? ''
+      : ' (${r.skippedLinks} lien(s) symbolique(s) ignoré(s) par sécurité)';
 
   Future<void> _extractSelected() async {
     if (_selected.isEmpty) return;
     final dest = await _pickDestDir();
     if (dest == null) return;
-    await _runOp(() async {
+    var skippedLinks = 0;
+    final ok = await _runOp(() async {
       var done = 0;
       for (final ep in _selected) {
-        await ArchiveService.extractEntry(
+        final r = await ArchiveService.extractEntry(
             widget.archivePath, ep, dest, password: _password);
+        skippedLinks += r.skippedLinks;
         done++;
         setState(() => _operationProgress = done / _selected.length);
       }
     });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Entrées extraites.')));
+    if (ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Entrées extraites.'
+              '${_skippedLinksNote(ExtractResult(skippedLinks: skippedLinks))}')));
     }
     setState(() { _selected.clear(); _selectMode = false; });
   }
@@ -273,14 +284,20 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  Future<void> _runOp(Future<void> Function() op) async {
+  /// Exécute [op] avec la barre de progression ; affiche l'erreur éventuelle.
+  /// Retourne `true` si l'opération a réussi (pour n'annoncer un succès
+  /// qu'après une réussite réelle).
+  Future<bool> _runOp(Future<void> Function() op) async {
     setState(() => _operationProgress = 0);
     try {
       await op();
+      return true;
     } on ArchiveOpException catch (e) {
       if (mounted) _showError(e.message);
+      return false;
     } catch (e) {
       if (mounted) _showError(e.toString());
+      return false;
     } finally {
       if (mounted) setState(() => _operationProgress = -1);
     }

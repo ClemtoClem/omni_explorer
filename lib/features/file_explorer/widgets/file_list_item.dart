@@ -265,12 +265,14 @@ class _ContextMenuBtn extends StatelessWidget {
 
   Future<void> _extractTo(BuildContext ctx, String dest) async {
     try {
-      await ArchiveService.extractAll(item.path, dest);
+      final result = await ArchiveService.extractAll(item.path, dest);
+      if (!ctx.mounted) return;
       ctx.read<FileExplorerProvider>().refresh();
-      if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('Extrait dans $dest')));
-      }
+      final links = result.skippedLinks == 0
+          ? ''
+          : ' (${result.skippedLinks} lien(s) symbolique(s) ignoré(s) par sécurité)';
+      ScaffoldMessenger.of(ctx).showSnackBar(
+          SnackBar(content: Text('Extrait dans $dest$links')));
     } catch (e) {
       if (ctx.mounted) {
         ScaffoldMessenger.of(ctx).showSnackBar(
