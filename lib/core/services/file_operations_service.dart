@@ -25,6 +25,15 @@ class FileOpException implements Exception {
   String toString() => message;
 }
 
+/// Déplacement entre stockages dont la copie a réussi mais dont l'original
+/// n'a pas pu être (entièrement) supprimé. La copie à [destination] est
+/// complète et conservée : l'original a pu être partiellement supprimé,
+/// la copie est alors le seul exemplaire complet.
+class PartialMoveException extends FileOpException {
+  final String destination;
+  const PartialMoveException(super.message, this.destination);
+}
+
 /// Décision quand la destination existe déjà.
 enum ConflictAction {
   /// Garder les deux : la copie reçoit un nom libre (« x (copie).txt »).
@@ -183,37 +192,59 @@ class FileOperationsService {
     required bool move,
     ConflictResolver? onConflict,
   }) async {
+    if (_typeOf(src) == FileSystemEntityType.notFound) {
+      throw const FileOpException('élément introuvable');
+    }
+    // Déplacer vers son propre dossier : rien à faire.
+    if (move && p.equals(p.dirname(src), destDir)) return false;
+    final dest = p.join(destDir, p.basename(src));
+    // Copie dans le même dossier : toujours une nouvelle copie, sans demander.
+    final sameEntry = p.equals(dest, src);
+    final placed = await relocate(src, dest,
+        move: move,
+        onConflict:
+            sameEntry ? (_, __) async => ConflictAction.keepBoth : onConflict);
+    return placed != null;
+  }
+
+  /// Copie ou déplace [src] vers le chemin exact [dest].
+  ///
+  /// Si [dest] existe, [onConflict] décide (sans résolveur : garder les deux,
+  /// la copie recevant un nom libre). Retourne le chemin final, ou `null` si
+  /// l'élément a été ignoré. Lève [FileOpException] ou
+  /// [FileSystemException] en cas d'échec, sans jamais laisser de copie
+  /// partielle ni écraser un élément sans décision explicite.
+  Future<String?> relocate(
+    String src,
+    String dest, {
+    required bool move,
+    ConflictResolver? onConflict,
+  }) async {
     final type = _typeOf(src);
     if (type == FileSystemEntityType.notFound) {
       throw const FileOpException('élément introuvable');
     }
-    if (type == FileSystemEntityType.directory && _isInside(destDir, src)) {
+    if (type == FileSystemEntityType.directory &&
+        _isInside(p.dirname(dest), src)) {
       throw const FileOpException(
           'impossible de placer un dossier dans lui-même');
     }
-    final name = p.basename(src);
-    // Déplacer vers son propre dossier : rien à faire.
-    if (move && p.equals(p.dirname(src), destDir)) return false;
-
-    var dest = p.join(destDir, name);
     if (_typeOf(dest) != FileSystemEntityType.notFound) {
-      final action = p.equals(dest, src)
-          ? ConflictAction.keepBoth // copie dans le même dossier
-          : await (onConflict?.call(src, dest) ??
-              Future.value(ConflictAction.keepBoth));
+      final action = await (onConflict?.call(src, dest) ??
+          Future.value(ConflictAction.keepBoth));
       switch (action) {
         case ConflictAction.skip:
-          return false;
+          return null;
         case ConflictAction.keepBoth:
-          dest = uniqueDestination(destDir, name,
+          dest = uniqueDestination(p.dirname(dest), p.basename(dest),
               keepExtension: type != FileSystemEntityType.directory);
         case ConflictAction.replace:
           await _replace(src, dest, type, move: move);
-          return true;
+          return dest;
       }
     }
     await _place(src, dest, type, move: move);
-    return true;
+    return dest;
   }
 
   /// Copie ou déplace [src] vers [dest], qui n'existe pas.
@@ -223,12 +254,31 @@ class FileOperationsService {
       try {
         await _entity(src, type).rename(dest);
         return;
-      } on FileSystemException {
-        // Autre stockage (carte SD…) : copie puis suppression de la source.
+      } on FileSystemException catch (e) {
+        // Seul un changement de stockage (carte SD…) justifie le repli
+        // « copie puis suppression » ; toute autre erreur (permission,
+        // lecture seule…) est remontée telle quelle, sans rien copier.
+        if (!_isCrossDevice(e)) rethrow;
       }
     }
     await _copyOrClean(src, dest, type);
-    if (move) await _deleteEntity(src, type);
+    if (move) {
+      try {
+        await _deleteEntity(src, type);
+      } on FileSystemException catch (e) {
+        throw PartialMoveException(
+            'copié, mais l\'original n\'a pas pu être supprimé '
+            '(${_reason(e)})',
+            dest);
+      }
+    }
+  }
+
+  /// Vrai si [e] signale un `rename` entre deux systèmes de fichiers.
+  static bool _isCrossDevice(FileSystemException e) {
+    final code = e.osError?.errorCode;
+    // EXDEV = 18 (Linux, Android, macOS) ; ERROR_NOT_SAME_DEVICE = 17.
+    return code == (Platform.isWindows ? 17 : 18);
   }
 
   /// Remplace [dest] (existant) par [src] sans jamais perdre les deux : la

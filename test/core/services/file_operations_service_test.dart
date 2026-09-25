@@ -277,6 +277,48 @@ void main() {
                 ? 'root ignore les permissions'
                 : null));
 
+    test('permission refusée : échec direct, rien n\'est copié', () async {
+      await Directory(p.join(a, 'ro')).create();
+      write(p.join(a, 'ro', 'f.txt'), 'x');
+      await Process.run('chmod', ['555', p.join(a, 'ro')]);
+
+      final r = await ops.transfer([p.join(a, 'ro', 'f.txt')], b, move: true);
+
+      await Process.run('chmod', ['755', p.join(a, 'ro')]);
+      expect(r.failures.single.reason, 'permission refusée');
+      expect(names(b), isEmpty); // pas de repli « copie »
+      expect(read(p.join(a, 'ro', 'f.txt')), 'x');
+    },
+        skip: Platform.isWindows
+            ? 'chmod indisponible'
+            : (Process.runSync('id', ['-u']).stdout.toString().trim() == '0'
+                ? 'root ignore les permissions'
+                : null));
+
+    test('déplacement vers un autre stockage : copie puis suppression',
+        () async {
+      final other =
+          Directory('/dev/shm').createTempSync('file_ops_cross_device_');
+      try {
+        await Directory(p.join(a, 'd')).create();
+        write(p.join(a, 'd', 'f.txt'), 'x');
+
+        final r = await ops.transfer([p.join(a, 'd')], other.path, move: true);
+
+        expect(r.succeeded.length, 1);
+        expect(read(p.join(other.path, 'd', 'f.txt')), 'x');
+        expect(Directory(p.join(a, 'd')).existsSync(), isFalse);
+      } finally {
+        other.deleteSync(recursive: true);
+      }
+    },
+        skip: !Directory('/dev/shm').existsSync() ||
+                FileStat.statSync('/dev/shm').type ==
+                    FileSystemEntityType.notFound ||
+                _sameDevice('/dev/shm', Directory.systemTemp.path)
+            ? 'pas de second système de fichiers disponible'
+            : null);
+
     test('rapporte chaque échec et continue', () async {
       write(p.join(a, 'ok.txt'), 'x');
       final r = await ops.transfer(
@@ -331,4 +373,12 @@ void main() {
           p.join(a, 'photos.2023 (copie)'));
     });
   });
+}
+
+/// Vrai si [a] et [b] sont sur le même système de fichiers (Linux, via stat).
+bool _sameDevice(String a, String b) {
+  final r = Process.runSync('stat', ['-c', '%d', a, b]);
+  if (r.exitCode != 0) return true;
+  final ids = r.stdout.toString().trim().split('\n');
+  return ids.length != 2 || ids[0] == ids[1];
 }
