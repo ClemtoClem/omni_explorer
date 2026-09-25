@@ -121,3 +121,103 @@ LanguageRegistry.instance.register(LanguageDefinition(
 - `path_provider` — Acces aux chemins systeme
 - `sqflite` — Base de donnees locale
 - `google_fonts` — Jost + Inter + JetBrains Mono
+
+## Build et tests
+
+### Prérequis
+- Flutter stable (validé avec Flutter 3.47.5 / Dart 3.13.4).
+- **JDK 17 ou 21** pour le build Android : AGP 8.11 et Kotlin 2.2 échouent sous
+  JDK 25 (`IllegalArgumentException: 25`).
+
+Le chemin du JDK dépend de la machine, il n'est donc **pas** versionné dans
+`android/gradle.properties`. Deux façons de le définir :
+
+```sh
+# Option 1 : configuration Gradle de l'utilisateur (tous les projets)
+echo "org.gradle.java.home=/usr/lib/jvm/java-21-openjdk-amd64" >> ~/.gradle/gradle.properties
+
+# Option 2 : JDK utilisé par Flutter
+flutter config --jdk-dir /usr/lib/jvm/java-21-openjdk-amd64
+```
+
+### Commandes
+
+```sh
+flutter pub get
+dart format --output=none --set-exit-if-changed lib test   # vérification du format
+flutter analyze                                           # analyse statique
+flutter test                                              # tests
+flutter build apk --debug                                 # APK de debug
+```
+
+Avec Flutter installé via **snap**, `flutter` sort en code 255 sans aucun
+message si sa sortie est redirigée vers un fichier (`flutter build … > log`).
+Passer par un pipe : `flutter build apk --debug 2>&1 | tee build.log`.
+
+## Journal des implémentations
+
+Le diagnostic complet et le plan priorisé (P0 à P3) sont dans
+[DIAGNOSTIC.md](DIAGNOSTIC.md). Chaque tâche est développée sur sa propre
+branche et documentée ici.
+
+### P0.0 : hygiène du dépôt et base de validation
+
+Branche : `p0/repo-hygiene`
+
+**Problèmes**
+- Le travail en cours sur l'éditeur multimédia (30 fichiers modifiés, 7 non
+  suivis) n'était pas commité : risque de perte.
+- Des fichiers qui n'ont rien à faire dans Git étaient suivis : une ancienne
+  copie des sources (`omni_explorer.zip`), les caches Gradle de l'exemple de
+  `packages/re_editor`, son `local.properties` (chemin du SDK de la machine) et
+  ses `GeneratedPluginRegistrant` générés.
+- `android/gradle.properties` imposait `org.gradle.java.home` avec un chemin
+  propre à une machine : le build échouait partout ailleurs (autre poste, CI).
+- Le seul test était le modèle « Counter » de Flutter, qui échouait.
+- Le build APK échouait à l'empaquetage : `fvp` et `ffmpeg-kit` embarquent
+  chacun `libc++_shared.so` (« 2 files found with path
+  lib/arm64-v8a/libc++_shared.so »). Le message de Flutter qui accuse
+  Java 25 est trompeur : Gradle tournait bien sous JDK 21.
+
+**Modifications**
+- Travail en cours commité tel quel sur la branche `wip/media-editor`
+  (commit `c103d19`), sans correction ; ses défauts connus sont listés dans
+  `DIAGNOSTIC.md`.
+- `.gitignore` : caches et sorties de build Android à tous les niveaux
+  (`**/android/.gradle/`, `**/android/build/`, `**/android/.kotlin/`,
+  `local.properties`, `GeneratedPluginRegistrant`), archives à la racine
+  (`/*.zip`), et fichiers de secrets (`key.properties`, `*.jks`, `*.keystore`,
+  `*.p12`, `.env`).
+- Fichiers ci-dessus retirés de l'index Git. Ils restent sur le disque
+  (`omni_explorer.zip` n'est pas supprimé).
+- `org.gradle.java.home` retiré de `android/gradle.properties` et remplacé par
+  un commentaire renvoyant à la section « Build et tests ».
+- `android/app/build.gradle.kts` : règle `packaging.jniLibs.pickFirsts` pour
+  ne garder qu'une copie de `libc++_shared.so`.
+- `test/widget_test.dart` remplacé par `test/app_smoke_test.dart` : l'application
+  est construite avec ses vrais providers (SharedPreferences simulées, polices
+  sans accès réseau) et doit afficher l'écran d'accueil et ses cartes, sans
+  exception.
+- `DIAGNOSTIC.md` (audit du projet) ajouté au dépôt.
+
+**Validation**
+- `flutter test` : 1 test, réussi.
+- `flutter analyze` : 0 erreur, 0 avertissement ; 13 remarques de style
+  préexistantes dans `lib/` (inchangées).
+- `dart format` : fichiers de test conformes.
+- `flutter build apk --debug` : réussi (`app-debug.apk`, 399 Mo : toutes les
+  architectures, FFmpeg complet et fvp embarqués ; la taille de l'APK de
+  release sera à traiter avec l'audit des dépendances).
+
+**Reste à faire (tâches suivantes)**
+- `lib/` n'est pas encore formaté par `dart format` (85 fichiers sur 112
+  seraient modifiés) ; ce sera fait
+  avec la mise en place de la CI (P2), pour ne pas mélanger un reformatage
+  massif avec des corrections.
+- La lecture vidéo (`fvp`) et l'export FFmpeg doivent être vérifiés sur un
+  appareil, puisqu'ils partagent désormais une seule runtime C++.
+- `ffmpeg_kit_flutter_new` embarque la variante **full-gpl** de FFmpeg :
+  distribuer l'APK impose alors la licence GPL à l'application. À trancher
+  lors de l'audit des dépendances (P2) : accepter la GPL ou passer à une
+  variante LGPL.
+- Pas encore de hook ni de CI qui bloque un commit de secret : prévu en P2.
