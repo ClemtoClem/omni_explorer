@@ -67,10 +67,17 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS"
                      tools:ignore="ProtectedPermissions" />
 
+    <!-- Sauvegarde désactivée : les données locales (préférences, index de la
+         corbeille, futur coffre-fort) ne doivent pas quitter l'appareil.
+         allowBackup couvre Android ≤ 11 ; dataExtractionRules couvre aussi le
+         transfert d'appareil à appareil sur Android 12+. -->
     <application
         android:label="omni_explorer"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:requestLegacyExternalStorage="true">
 
         <activity
