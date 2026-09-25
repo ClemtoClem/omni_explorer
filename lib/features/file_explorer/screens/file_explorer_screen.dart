@@ -18,6 +18,7 @@ import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/models/file_item.dart';
 import '../../../core/services/app_state_service.dart';
+import '../../../core/services/file_operations_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
 import '../../../core/utils/file_opener.dart';
@@ -26,6 +27,7 @@ import '../providers/file_explorer_provider.dart';
 import '../widgets/file_list_item.dart';
 import '../widgets/file_grid_item.dart';
 import '../widgets/path_bar.dart';
+import '../widgets/file_op_dialogs.dart';
 import '../widgets/filter_bar.dart';
 import '../widgets/shortcut_panel.dart';
 
@@ -610,16 +612,9 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       ),
     );
     if (ok != true) return;
-    for (final path in prov.selected) {
-      final type = FileSystemEntity.typeSync(path);
-      if (type == FileSystemEntityType.directory) {
-        await Directory(path).delete(recursive: true);
-      } else {
-        await File(path).delete();
-      }
-    }
+    final report = await prov.deletePermanently(prov.selected.toList());
     prov.clearSelection();
-    prov.refresh();
+    if (mounted) showFileOpReport(context, report, verb: 'supprimé(s)');
   }
 
   void _copySelected(BuildContext ctx, FileExplorerProvider prov) {
@@ -640,13 +635,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
 
   Future<void> _pasteHere(BuildContext ctx, FileExplorerProvider prov) async {
     final wasCut = prov.clipboardIsCut;
-    final count  = await prov.pasteClipboard();
+    final report = await prov.pasteClipboard(
+        onConflict: askingConflictResolver(context));
     if (!mounted) return;
-    final verb = wasCut ? 'déplacé(s)' : 'collé(s)';
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(count > 0
-            ? '$count élément(s) $verb'
-            : 'Aucun élément collé')));
+    showFileOpReport(context, report,
+        verb: wasCut ? 'déplacé(s)' : 'collé(s)');
   }
 
   Future<void> _compressSelected(BuildContext ctx, FileExplorerProvider prov) async {
@@ -682,6 +675,32 @@ class _NewItemSheet extends StatefulWidget {
 class _NewItemSheetState extends State<_NewItemSheet> {
   final _ctrl = TextEditingController();
   bool _isDir = true;
+  String? _error;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _create(BuildContext ctx) async {
+    final name = _ctrl.text.trim();
+    final invalid = FileNameValidator.validate(name);
+    if (invalid != null) {
+      setState(() => _error = invalid);
+      return;
+    }
+    try {
+      if (_isDir) {
+        await widget.provider.createDirectory(name);
+      } else {
+        await widget.provider.createFile(name);
+      }
+      if (ctx.mounted) Navigator.pop(ctx);
+    } on FileOpException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    }
+  }
 
   @override
   Widget build(BuildContext ctx) {
@@ -717,7 +736,13 @@ class _NewItemSheetState extends State<_NewItemSheet> {
               hintText: _isDir
                   ? 'Nom du dossier'
                   : 'Nom du fichier (ex: script.py)',
+              errorText: _error,
+              errorMaxLines: 3,
             ),
+            onChanged: (_) {
+              if (_error != null) setState(() => _error = null);
+            },
+            onSubmitted: (_) => _create(ctx),
           ),
           const SizedBox(height: 16),
           Row(
@@ -728,16 +753,7 @@ class _NewItemSheetState extends State<_NewItemSheet> {
                   child: const Text('Annuler')),
               const SizedBox(width: 8),
               FilledButton(
-                onPressed: () async {
-                  final name = _ctrl.text.trim();
-                  if (name.isEmpty) return;
-                  if (_isDir) {
-                    await widget.provider.createDirectory(name);
-                  } else {
-                    await widget.provider.createFile(name);
-                  }
-                  if (ctx.mounted) Navigator.pop(ctx);
-                },
+                onPressed: () => _create(ctx),
                 child: const Text('Créer'),
               ),
             ],

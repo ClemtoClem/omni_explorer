@@ -16,6 +16,7 @@ import '../../../features/archive/services/archive_service.dart';
 import '../../../features/media_player/providers/media_player_provider.dart';
 import '../../../features/video_editor/screens/video_editor_screen.dart';
 import '../providers/file_explorer_provider.dart';
+import 'file_op_dialogs.dart';
 import 'file_properties_dialog.dart';
 
 /// @class FileListItem
@@ -321,24 +322,11 @@ class _ContextMenuBtn extends StatelessWidget {
   }
 
   void _showRenameDialog(BuildContext ctx) {
-    final ctrl = TextEditingController(text: item.name);
-    showDialog(
-      context: ctx,
-      builder: (_) => AlertDialog(
-        title: const Text('Renommer'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Nouveau nom'),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Renommer'),
-          ),
-        ],
-      ),
+    final prov = ctx.read<FileExplorerProvider>();
+    showRenameDialog(
+      ctx,
+      currentName: item.name,
+      onSubmit: (newName) => prov.rename(item.path, newName),
     );
   }
 }

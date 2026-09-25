@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../../../app/constants/app_constants.dart';
 import '../../../core/models/file_item.dart';
+import '../../../core/services/file_operations_service.dart';
 import '../../../core/services/settings_service.dart';
 import 'dart:developer' as developer;
 
@@ -18,6 +19,7 @@ import 'dart:developer' as developer;
 /// @brief Provider principal de l'explorateur de fichiers.
 class FileExplorerProvider extends ChangeNotifier {
   final SettingsService _settings;
+  final FileOperationsService _ops = const FileOperationsService();
 
   FileExplorerProvider(this._settings) {
     _settings.addListener(_onSettingsChanged);
@@ -358,49 +360,32 @@ class FileExplorerProvider extends ChangeNotifier {
 
   // ── Opérations sur fichiers ───────────────────────────────────────────────
 
+  /// Crée le dossier [name] dans le dossier courant.
+  /// Lève [FileOpException] (nom invalide, élément existant…).
   Future<void> createDirectory(String name) async {
-    final newDir = Directory(p.join(_currentPath, name));
-    if (!newDir.existsSync()) await newDir.create();
+    await _ops.createDirectory(_currentPath, name);
     await _loadEntries();
   }
 
+  /// Crée le fichier vide [name] dans le dossier courant.
+  /// Lève [FileOpException] (nom invalide, élément existant…).
   Future<void> createFile(String name) async {
-    final newFile = File(p.join(_currentPath, name));
-    if (!newFile.existsSync()) await newFile.create();
+    await _ops.createFile(_currentPath, name);
     await _loadEntries();
   }
 
+  /// Renomme [oldPath] en [newName] sans jamais écraser un autre élément.
+  /// Lève [FileOpException] en cas de refus ou d'échec.
   Future<void> rename(String oldPath, String newName) async {
-    final newPath = p.join(p.dirname(oldPath), newName);
-    final type = FileSystemEntity.typeSync(oldPath);
-    if (type == FileSystemEntityType.directory) {
-      await Directory(oldPath).rename(newPath);
-    } else {
-      await File(oldPath).rename(newPath);
-    }
+    await _ops.rename(oldPath, newName);
     await _loadEntries();
   }
 
-  Future<void> copyTo(String sourcePath, String destDir) async {
-    final name = p.basename(sourcePath);
-    final dest = p.join(destDir, name);
-    if (_isFile(sourcePath)) {
-      await File(sourcePath).copy(dest);
-    } else {
-      await _copyDirectory(Directory(sourcePath), Directory(dest));
-    }
+  /// Supprime définitivement [paths] (sans corbeille).
+  Future<FileOpReport> deletePermanently(Iterable<String> paths) async {
+    final report = await _ops.deletePermanently(paths.toList());
     await _loadEntries();
-  }
-
-  Future<void> _copyDirectory(Directory src, Directory dst) async {
-    await dst.create(recursive: true);
-    await for (final e in src.list()) {
-      if (e is File) {
-        await e.copy(p.join(dst.path, p.basename(e.path)));
-      } else if (e is Directory) {
-        await _copyDirectory(e, Directory(p.join(dst.path, p.basename(e.path))));
-      }
-    }
+    return report;
   }
 
   // ── Presse-papiers ─────────────────────────────────────────────────────────
@@ -427,79 +412,25 @@ class FileExplorerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<int> pasteClipboard() async {
-    if (_clipboard.isEmpty) return 0;
-    int count = 0;
-    final wasCut = _clipboardCut;
-    for (final src in List<String>.of(_clipboard)) {
-      if (!_pathExists(src)) continue;
-      if (_isAncestorOrEqual(src, _currentPath)) continue;
-      final dest = _uniqueDestPath(_currentPath, p.basename(src));
-      try {
-        if (wasCut) {
-          await _moveEntity(src, dest);
-        } else {
-          await _copyEntity(src, dest);
-        }
-        count++;
-      } catch (e) {
-        developer.log('Paste error for $src: $e', name: 'FileExplorerProvider');
-      }
-    }
-    if (wasCut) {
-      clearClipboard();
+  /// Colle le presse-papiers dans le dossier courant.
+  ///
+  /// [onConflict] décide pour chaque élément dont le nom existe déjà (sans
+  /// résolveur : les deux sont gardés). Après un « couper », seuls les
+  /// éléments en échec restent dans le presse-papiers, pour réessayer.
+  Future<FileOpReport> pasteClipboard({ConflictResolver? onConflict}) async {
+    final report = await _ops.transfer(
+      List<String>.of(_clipboard),
+      _currentPath,
+      move: _clipboardCut,
+      onConflict: onConflict,
+    );
+    if (_clipboardCut) {
+      final failed = report.failures.map((f) => f.path).toSet();
+      _clipboard.removeWhere((path) => !failed.contains(path));
+      if (_clipboard.isEmpty) _clipboardCut = false;
     }
     await _loadEntries();
-    return count;
-  }
-
-  bool _pathExists(String path) =>
-      FileSystemEntity.typeSync(path) != FileSystemEntityType.notFound;
-
-  bool _isDirectory(String path) =>
-      FileSystemEntity.typeSync(path) == FileSystemEntityType.directory;
-
-  bool _isFile(String path) =>
-      FileSystemEntity.typeSync(path) == FileSystemEntityType.file;
-
-  String _uniqueDestPath(String dir, String name) {
-    var dest = p.join(dir, name);
-    if (!_pathExists(dest)) return dest;
-    final ext  = p.extension(name);
-    final base = p.basenameWithoutExtension(name);
-    int i = 1;
-    while (_pathExists(dest)) {
-      final suffix = i == 1 ? ' (copie)' : ' (copie $i)';
-      dest = p.join(dir, '$base$suffix$ext');
-      i++;
-    }
-    return dest;
-  }
-
-  Future<void> _copyEntity(String src, String dest) async {
-    if (_isDirectory(src)) {
-      await _copyDirectory(Directory(src), Directory(dest));
-    } else {
-      await File(src).copy(dest);
-    }
-  }
-
-  Future<void> _moveEntity(String src, String dest) async {
-    final isDir = _isDirectory(src);
-    try {
-      if (isDir) {
-        await Directory(src).rename(dest);
-      } else {
-        await File(src).rename(dest);
-      }
-    } on FileSystemException {
-      await _copyEntity(src, dest);
-      if (isDir) {
-        await Directory(src).delete(recursive: true);
-      } else {
-        await File(src).delete();
-      }
-    }
+    return report;
   }
 
   // ── Stockages externes ────────────────────────────────────────────────────
