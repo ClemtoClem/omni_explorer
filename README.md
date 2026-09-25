@@ -190,6 +190,12 @@ Branche : `p0/repo-hygiene`
   `*.p12`, `.env`).
 - Fichiers ci-dessus retirés de l'index Git. Ils restent sur le disque
   (`omni_explorer.zip` n'est pas supprimé).
+  **Correction (P0.6)** : ce retrait n'avait en réalité pas eu lieu. Le
+  commit de P0.0 avait été fait avec `git commit -- <chemins>`, qui prend le
+  contenu de l'arbre de travail : les caches ont été committés modifiés au
+  lieu d'être retirés, et le zip est resté suivi. Le retrait a été refait
+  (commit `chore(repo): actually untrack…`), et
+  `git ls-files -ci --exclude-standard` est maintenant vide.
 - `org.gradle.java.home` retiré de `android/gradle.properties` et remplacé par
   un commentaire renvoyant à la section « Build et tests ».
 - `android/app/build.gradle.kts` : règle `packaging.jniLibs.pickFirsts` pour
