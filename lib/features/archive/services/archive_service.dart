@@ -56,14 +56,18 @@ class ArchiveService {
     if (starts([0x50, 0x4B, 0x03, 0x04]) || starts([0x50, 0x4B, 0x05, 0x06])) {
       return byName == ArchiveType.jar ? ArchiveType.jar : ArchiveType.zip;
     }
-    if (starts([0x1F, 0x8B])) return compressed(ArchiveType.gz, ArchiveType.tarGz);
+    if (starts([0x1F, 0x8B])) {
+      return compressed(ArchiveType.gz, ArchiveType.tarGz);
+    }
     if (starts([0x42, 0x5A, 0x68])) {
       return compressed(ArchiveType.bz2, ArchiveType.tarBz2);
     }
     if (starts([0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00])) {
       return compressed(ArchiveType.xz, ArchiveType.tarXz);
     }
-    if (starts([0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])) return ArchiveType.sevenZip;
+    if (starts([0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])) {
+      return ArchiveType.sevenZip;
+    }
     if (starts([0x52, 0x61, 0x72, 0x21, 0x1A, 0x07])) return ArchiveType.rar;
     if (starts('ustar'.codeUnits, 257) || _isTarHeader(head)) {
       return ArchiveType.tar;
@@ -92,23 +96,36 @@ class ArchiveService {
   /// Format d'après l'extension seule (fichier à créer, ou illisible).
   static ArchiveType detectTypeByName(String path) {
     final lo = path.toLowerCase();
-    if (lo.endsWith('.tar.gz')  || lo.endsWith('.tgz'))  return ArchiveType.tarGz;
-    if (lo.endsWith('.tar.bz2') || lo.endsWith('.tbz2') || lo.endsWith('.tbz')) {
+    if (lo.endsWith('.tar.gz') || lo.endsWith('.tgz')) return ArchiveType.tarGz;
+    if (lo.endsWith('.tar.bz2') ||
+        lo.endsWith('.tbz2') ||
+        lo.endsWith('.tbz')) {
       return ArchiveType.tarBz2;
     }
-    if (lo.endsWith('.tar.xz')  || lo.endsWith('.txz'))  return ArchiveType.tarXz;
+    if (lo.endsWith('.tar.xz') || lo.endsWith('.txz')) return ArchiveType.tarXz;
     final ext = p.extension(lo).replaceFirst('.', '');
     switch (ext) {
-      case 'zip':                       return ArchiveType.zip;
-      case 'jar': case 'war':
-      case 'ear': case 'apk':          return ArchiveType.jar;
-      case 'tar':                       return ArchiveType.tar;
-      case 'gz':                        return ArchiveType.gz;
-      case 'bz2':                       return ArchiveType.bz2;
-      case 'xz':                        return ArchiveType.xz;
-      case '7z':                        return ArchiveType.sevenZip;
-      case 'rar':                       return ArchiveType.rar;
-      default:                          return ArchiveType.unknown;
+      case 'zip':
+        return ArchiveType.zip;
+      case 'jar':
+      case 'war':
+      case 'ear':
+      case 'apk':
+        return ArchiveType.jar;
+      case 'tar':
+        return ArchiveType.tar;
+      case 'gz':
+        return ArchiveType.gz;
+      case 'bz2':
+        return ArchiveType.bz2;
+      case 'xz':
+        return ArchiveType.xz;
+      case '7z':
+        return ArchiveType.sevenZip;
+      case 'rar':
+        return ArchiveType.rar;
+      default:
+        return ArchiveType.unknown;
     }
   }
 
@@ -170,7 +187,8 @@ class ArchiveService {
   }
 
   static ArchiveEntryInfo _zipFileToEntry(arc.ArchiveFile f) {
-    final raw = f.name.endsWith('/') ? f.name.substring(0, f.name.length - 1) : f.name;
+    final raw =
+        f.name.endsWith('/') ? f.name.substring(0, f.name.length - 1) : f.name;
     return ArchiveEntryInfo(
       name: p.basename(raw),
       fullPath: raw,
@@ -190,8 +208,8 @@ class ArchiveService {
 
   static Future<List<ArchiveEntryInfo>> _listTarGz(String path) async {
     final bytes = await File(path).readAsBytes();
-    return _archiveToEntries(
-        arc.TarDecoder().decodeBytes(const arc.GZipDecoder().decodeBytes(bytes)));
+    return _archiveToEntries(arc.TarDecoder()
+        .decodeBytes(const arc.GZipDecoder().decodeBytes(bytes)));
   }
 
   static Future<List<ArchiveEntryInfo>> _listTarBz2(String path) async {
@@ -323,16 +341,22 @@ class ArchiveService {
     final bytes = await File(archivePath).readAsBytes();
     switch (type) {
       case ArchiveType.gz:
-        return _writeSingle(path: archivePath,
-            decoded: const arc.GZipDecoder().decodeBytes(bytes), destDir: destDir,
+        return _writeSingle(
+            path: archivePath,
+            decoded: const arc.GZipDecoder().decodeBytes(bytes),
+            destDir: destDir,
             onConflict: onConflict);
       case ArchiveType.bz2:
-        return _writeSingle(path: archivePath,
-            decoded: arc.BZip2Decoder().decodeBytes(bytes), destDir: destDir,
+        return _writeSingle(
+            path: archivePath,
+            decoded: arc.BZip2Decoder().decodeBytes(bytes),
+            destDir: destDir,
             onConflict: onConflict);
       case ArchiveType.xz:
-        return _writeSingle(path: archivePath,
-            decoded: arc.XZDecoder().decodeBytes(bytes), destDir: destDir,
+        return _writeSingle(
+            path: archivePath,
+            decoded: arc.XZDecoder().decodeBytes(bytes),
+            destDir: destDir,
             onConflict: onConflict);
       default:
         final archive = _decodeMulti(type, bytes, password: password);
@@ -354,9 +378,11 @@ class ArchiveService {
       case ArchiveType.tar:
         return arc.TarDecoder().decodeBytes(bytes);
       case ArchiveType.tarGz:
-        return arc.TarDecoder().decodeBytes(const arc.GZipDecoder().decodeBytes(bytes));
+        return arc.TarDecoder()
+            .decodeBytes(const arc.GZipDecoder().decodeBytes(bytes));
       case ArchiveType.tarBz2:
-        return arc.TarDecoder().decodeBytes(arc.BZip2Decoder().decodeBytes(bytes));
+        return arc.TarDecoder()
+            .decodeBytes(arc.BZip2Decoder().decodeBytes(bytes));
       case ArchiveType.tarXz:
         return arc.TarDecoder().decodeBytes(arc.XZDecoder().decodeBytes(bytes));
       default:
@@ -486,7 +512,15 @@ class ArchiveService {
     await Directory(dest).create(recursive: true);
     // -aou : renomme automatiquement les fichiers déjà présents (au lieu de
     // les écraser avec -y seul).
-    final args = ['x', '-y', '-aou', '-o$dest', if (password != null) '-p$password', '--', path];
+    final args = [
+      'x',
+      '-y',
+      '-aou',
+      '-o$dest',
+      if (password != null) '-p$password',
+      '--',
+      path
+    ];
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
     return ExtractResult(
@@ -504,7 +538,14 @@ class ArchiveService {
     _validateNames(dest, entries.map((e) => e.fullPath));
     await Directory(dest).create(recursive: true);
     // -or : renomme automatiquement les fichiers déjà présents.
-    final args = ['x', '-y', '-or', if (password != null) '-p$password', path, '$dest/'];
+    final args = [
+      'x',
+      '-y',
+      '-or',
+      if (password != null) '-p$password',
+      path,
+      '$dest/'
+    ];
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur unrar : ${r.stderr}');
     return ExtractResult(
@@ -567,8 +608,14 @@ class ArchiveService {
       }
       await _produceThenRename(
           destPath,
-          (tmp) => _run7z(cmd,
-              ['a', '-tzip', '-p$password', '-mem=AES256', tmp, ...sourcePaths]));
+          (tmp) => _run7z(cmd, [
+                'a',
+                '-tzip',
+                '-p$password',
+                '-mem=AES256',
+                tmp,
+                ...sourcePaths
+              ]));
       return;
     }
     final archive = arc.Archive();
@@ -597,7 +644,8 @@ class ArchiveService {
       onProgress?.call(done / total);
     }
     final tarBytes = arc.TarEncoder().encode(archive);
-    final gzBytes = const arc.GZipEncoder().encode(Uint8List.fromList(tarBytes));
+    final gzBytes =
+        const arc.GZipEncoder().encode(Uint8List.fromList(tarBytes));
     await AtomicWrite.bytes(destPath, gzBytes);
   }
 
@@ -712,8 +760,8 @@ class ArchiveService {
       await extractAll(archivePath, tempDir.path);
       final sources = await tempDir.list().map((e) => e.path).toList();
       // L'original reste intact jusqu'au renommage final (atomique).
-      await _produceThenRename(archivePath,
-          (tmp) => createZip(tmp, sources, password: newPassword));
+      await _produceThenRename(
+          archivePath, (tmp) => createZip(tmp, sources, password: newPassword));
     } finally {
       await tempDir.delete(recursive: true);
     }
@@ -727,8 +775,7 @@ class ArchiveService {
     try {
       await extractAll(archivePath, tempDir.path, password: currentPassword);
       final sources = await tempDir.list().map((e) => e.path).toList();
-      await _produceThenRename(
-          archivePath, (tmp) => createZip(tmp, sources));
+      await _produceThenRename(archivePath, (tmp) => createZip(tmp, sources));
     } finally {
       await tempDir.delete(recursive: true);
     }
@@ -790,11 +837,15 @@ class ArchiveService {
       DateTime? modified;
       for (final line in block.split('\n')) {
         final t = line.trim();
-        if (t.startsWith('Path = '))         name    = t.substring(7);
-        if (t.startsWith('Size = '))         size    = int.tryParse(t.substring(7)) ?? 0;
-        if (t.startsWith('Packed Size = '))  packed  = int.tryParse(t.substring(14)) ?? 0;
-        if (t.startsWith('Attributes = '))   isDir   = t.contains('D');
-        if (t.startsWith('Modified = '))     modified = DateTime.tryParse(t.substring(11).trim());
+        if (t.startsWith('Path = ')) name = t.substring(7);
+        if (t.startsWith('Size = ')) size = int.tryParse(t.substring(7)) ?? 0;
+        if (t.startsWith('Packed Size = ')) {
+          packed = int.tryParse(t.substring(14)) ?? 0;
+        }
+        if (t.startsWith('Attributes = ')) isDir = t.contains('D');
+        if (t.startsWith('Modified = ')) {
+          modified = DateTime.tryParse(t.substring(11).trim());
+        }
       }
       if (name != null && name.isNotEmpty) {
         entries.add(ArchiveEntryInfo(
@@ -824,9 +875,9 @@ class ArchiveService {
       final name = l;
       if (i + 1 < lines.length) {
         final meta = lines[i + 1].trim().split(RegExp(r'\s+'));
-        final size   = meta.isNotEmpty ? int.tryParse(meta[0]) ?? 0 : 0;
-        final packed = meta.length > 1  ? int.tryParse(meta[1]) ?? 0 : 0;
-        final isDir  = meta.length > 4  ? meta[4].contains('D') : false;
+        final size = meta.isNotEmpty ? int.tryParse(meta[0]) ?? 0 : 0;
+        final packed = meta.length > 1 ? int.tryParse(meta[1]) ?? 0 : 0;
+        final isDir = meta.length > 4 ? meta[4].contains('D') : false;
         entries.add(ArchiveEntryInfo(
           name: p.basename(name),
           fullPath: name,

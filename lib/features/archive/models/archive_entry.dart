@@ -5,7 +5,7 @@ import 'package:material_design_icons_flutter/material_design_icons_flutter.dart
 
 enum ArchiveType {
   zip,
-  jar,    // ZIP-based : .jar, .war, .ear, .apk
+  jar, // ZIP-based : .jar, .war, .ear, .apk
   tar,
   tarGz,
   tarBz2,
@@ -21,18 +21,30 @@ enum ArchiveType {
 extension ArchiveTypeExt on ArchiveType {
   String get label {
     switch (this) {
-      case ArchiveType.zip:     return 'ZIP';
-      case ArchiveType.jar:     return 'JAR';
-      case ArchiveType.tar:     return 'TAR';
-      case ArchiveType.tarGz:   return 'TAR.GZ';
-      case ArchiveType.tarBz2:  return 'TAR.BZ2';
-      case ArchiveType.tarXz:   return 'TAR.XZ';
-      case ArchiveType.gz:      return 'GZ';
-      case ArchiveType.bz2:     return 'BZ2';
-      case ArchiveType.xz:      return 'XZ';
-      case ArchiveType.sevenZip:return '7Z';
-      case ArchiveType.rar:     return 'RAR';
-      case ArchiveType.unknown: return '?';
+      case ArchiveType.zip:
+        return 'ZIP';
+      case ArchiveType.jar:
+        return 'JAR';
+      case ArchiveType.tar:
+        return 'TAR';
+      case ArchiveType.tarGz:
+        return 'TAR.GZ';
+      case ArchiveType.tarBz2:
+        return 'TAR.BZ2';
+      case ArchiveType.tarXz:
+        return 'TAR.XZ';
+      case ArchiveType.gz:
+        return 'GZ';
+      case ArchiveType.bz2:
+        return 'BZ2';
+      case ArchiveType.xz:
+        return 'XZ';
+      case ArchiveType.sevenZip:
+        return '7Z';
+      case ArchiveType.rar:
+        return 'RAR';
+      case ArchiveType.unknown:
+        return '?';
     }
   }
 
@@ -58,12 +70,15 @@ extension ArchiveTypeExt on ArchiveType {
   /// Pourquoi l'archive est en lecture seule (`null` si [canEdit]).
   String? get readOnlyReason => switch (this) {
         _ when canEdit => null,
-        ArchiveType.tarXz || ArchiveType.xz =>
+        ArchiveType.tarXz ||
+        ArchiveType.xz =>
           'XZ : l\'encodeur disponible n\'écrit que des données non '
               'compressées ; l\'archive est donc en lecture seule.',
-        ArchiveType.gz || ArchiveType.bz2 =>
+        ArchiveType.gz ||
+        ArchiveType.bz2 =>
           'Fichier compressé unique : rien à organiser à l\'intérieur.',
-        ArchiveType.sevenZip || ArchiveType.rar =>
+        ArchiveType.sevenZip ||
+        ArchiveType.rar =>
           '$label : lecture et extraction uniquement (outil externe, sous '
               'Linux).',
         _ => 'Format non reconnu.',
@@ -71,45 +86,65 @@ extension ArchiveTypeExt on ArchiveType {
 
   /// Un seul fichier compressé, sans arborescence.
   bool get isSingleFile =>
-      this == ArchiveType.gz || this == ArchiveType.bz2 || this == ArchiveType.xz;
+      this == ArchiveType.gz ||
+      this == ArchiveType.bz2 ||
+      this == ArchiveType.xz;
 
   /// Prend en charge un mot de passe : ZIP (AES, natif sur toutes les
   /// plateformes), 7z et RAR (outil externe, lecture).
   bool get supportsPassword =>
-      this == ArchiveType.zip || this == ArchiveType.sevenZip ||
-      this == ArchiveType.rar || this == ArchiveType.jar;
+      this == ArchiveType.zip ||
+      this == ArchiveType.sevenZip ||
+      this == ArchiveType.rar ||
+      this == ArchiveType.jar;
 
   IconData get icon {
     switch (this) {
-      case ArchiveType.zip:      return MdiIcons.zipBox;
-      case ArchiveType.jar:      return MdiIcons.languageJava;
-      case ArchiveType.tar:      return MdiIcons.packageVariantClosed;
+      case ArchiveType.zip:
+        return MdiIcons.zipBox;
+      case ArchiveType.jar:
+        return MdiIcons.languageJava;
+      case ArchiveType.tar:
+        return MdiIcons.packageVariantClosed;
       case ArchiveType.tarGz:
       case ArchiveType.tarBz2:
-      case ArchiveType.tarXz:   return MdiIcons.packageVariantClosedCheck;
+      case ArchiveType.tarXz:
+        return MdiIcons.packageVariantClosedCheck;
       case ArchiveType.gz:
       case ArchiveType.bz2:
-      case ArchiveType.xz:      return MdiIcons.archiveArrowDownOutline;
-      case ArchiveType.sevenZip:return MdiIcons.archiveArrowDown;
-      case ArchiveType.rar:     return MdiIcons.zipBoxOutline;
-      case ArchiveType.unknown: return MdiIcons.fileOutline;
+      case ArchiveType.xz:
+        return MdiIcons.archiveArrowDownOutline;
+      case ArchiveType.sevenZip:
+        return MdiIcons.archiveArrowDown;
+      case ArchiveType.rar:
+        return MdiIcons.zipBoxOutline;
+      case ArchiveType.unknown:
+        return MdiIcons.fileOutline;
     }
   }
 
   Color get color {
     switch (this) {
-      case ArchiveType.zip:      return const Color(0xFFFF9800);
-      case ArchiveType.jar:      return const Color(0xFFF44336);
-      case ArchiveType.tar:      return const Color(0xFF8D6E63);
+      case ArchiveType.zip:
+        return const Color(0xFFFF9800);
+      case ArchiveType.jar:
+        return const Color(0xFFF44336);
+      case ArchiveType.tar:
+        return const Color(0xFF8D6E63);
       case ArchiveType.tarGz:
       case ArchiveType.tarBz2:
-      case ArchiveType.tarXz:   return const Color(0xFFFF8F00);
+      case ArchiveType.tarXz:
+        return const Color(0xFFFF8F00);
       case ArchiveType.gz:
       case ArchiveType.bz2:
-      case ArchiveType.xz:      return const Color(0xFF4CAF50);
-      case ArchiveType.sevenZip:return const Color(0xFF2196F3);
-      case ArchiveType.rar:     return const Color(0xFF9C27B0);
-      case ArchiveType.unknown: return const Color(0xFF607D8B);
+      case ArchiveType.xz:
+        return const Color(0xFF4CAF50);
+      case ArchiveType.sevenZip:
+        return const Color(0xFF2196F3);
+      case ArchiveType.rar:
+        return const Color(0xFF9C27B0);
+      case ArchiveType.unknown:
+        return const Color(0xFF607D8B);
     }
   }
 }
@@ -153,8 +188,9 @@ class ArchiveEntryInfo {
   double get compressionRatio =>
       (compressedSize > 0 && size > 0) ? 1.0 - compressedSize / size : -1;
 
-  String get _normalized =>
-      fullPath.endsWith('/') ? fullPath.substring(0, fullPath.length - 1) : fullPath;
+  String get _normalized => fullPath.endsWith('/')
+      ? fullPath.substring(0, fullPath.length - 1)
+      : fullPath;
 }
 
 // ── Exception d'archive ───────────────────────────────────────────────────────
