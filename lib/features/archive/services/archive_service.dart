@@ -60,7 +60,7 @@ class ArchiveService {
       case ArchiveType.tarXz:
         return _listTarXz(path);
       case ArchiveType.gz:
-        return _listSingle(path, (b) => arc.GZipDecoder().decodeBytes(b));
+        return _listSingle(path, (b) => const arc.GZipDecoder().decodeBytes(b));
       case ArchiveType.bz2:
         return _listSingle(path, (b) => arc.BZip2Decoder().decodeBytes(b));
       case ArchiveType.xz:
@@ -119,7 +119,7 @@ class ArchiveService {
   static Future<List<ArchiveEntryInfo>> _listTarGz(String path) async {
     final bytes = await File(path).readAsBytes();
     return _archiveToEntries(
-        arc.TarDecoder().decodeBytes(arc.GZipDecoder().decodeBytes(bytes)));
+        arc.TarDecoder().decodeBytes(const arc.GZipDecoder().decodeBytes(bytes)));
   }
 
   static Future<List<ArchiveEntryInfo>> _listTarBz2(String path) async {
@@ -252,7 +252,7 @@ class ArchiveService {
     switch (type) {
       case ArchiveType.gz:
         return _writeSingle(path: archivePath,
-            decoded: arc.GZipDecoder().decodeBytes(bytes), destDir: destDir,
+            decoded: const arc.GZipDecoder().decodeBytes(bytes), destDir: destDir,
             onConflict: onConflict);
       case ArchiveType.bz2:
         return _writeSingle(path: archivePath,
@@ -282,7 +282,7 @@ class ArchiveService {
       case ArchiveType.tar:
         return arc.TarDecoder().decodeBytes(bytes);
       case ArchiveType.tarGz:
-        return arc.TarDecoder().decodeBytes(arc.GZipDecoder().decodeBytes(bytes));
+        return arc.TarDecoder().decodeBytes(const arc.GZipDecoder().decodeBytes(bytes));
       case ArchiveType.tarBz2:
         return arc.TarDecoder().decodeBytes(arc.BZip2Decoder().decodeBytes(bytes));
       case ArchiveType.tarXz:
@@ -525,10 +525,7 @@ class ArchiveService {
       onProgress?.call(done / total);
     }
     final tarBytes = arc.TarEncoder().encode(archive);
-    final gzBytes = arc.GZipEncoder().encode(Uint8List.fromList(tarBytes));
-    if (gzBytes == null) {
-      throw const ArchiveOpException('Échec de la compression.');
-    }
+    final gzBytes = const arc.GZipEncoder().encode(Uint8List.fromList(tarBytes));
     await AtomicWrite.bytes(destPath, gzBytes);
   }
 
@@ -597,13 +594,8 @@ class ArchiveService {
     if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
   }
 
-  static List<int> _encodeZip(arc.Archive archive) {
-    final encoded = arc.ZipEncoder().encode(archive);
-    if (encoded == null) {
-      throw const ArchiveOpException('Échec de la compression.');
-    }
-    return encoded;
-  }
+  static List<int> _encodeZip(arc.Archive archive) =>
+      arc.ZipEncoder().encode(archive);
 
   // ── Modification ZIP ──────────────────────────────────────────────────────
 
@@ -704,7 +696,8 @@ class ArchiveService {
       final bytes = await File(path).readAsBytes();
       archive.addFile(arc.ArchiveFile(archivePath, bytes.length, bytes));
     } else if (type == FileSystemEntityType.directory) {
-      archive.addFile(arc.ArchiveFile('$archivePath/', 0, <int>[]));
+      // Constructeur dédié d'archive 4 pour une entrée « dossier ».
+      archive.addFile(arc.ArchiveFile.directory('$archivePath/'));
       await for (final entity in Directory(path).list()) {
         await _addToArchive(
           archive,

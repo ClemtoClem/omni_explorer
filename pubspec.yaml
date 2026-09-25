@@ -80,7 +80,7 @@ dependencies:
 
   # ── Utilities ───────────────────────────────────────────────────────────────
   uuid: ^4.4.2
-  archive: ^3.6.1
+  archive: ^4.0.7
   open_filex: ^4.4.0
   # share_plus >=10.1.0 utilise web ^1.0.0, compatible avec pdfx >=2.9.0
   # share_plus 10.x garde l'ancienne API Share.share() — pas de breaking change
@@ -92,6 +92,7 @@ dependencies:
   cupertino_icons: ^1.0.9
   camera: ^0.12.0+1
   record: ^7.0.0
+  sodium: ^4.1.1
 
 dev_dependencies:
   flutter_test:

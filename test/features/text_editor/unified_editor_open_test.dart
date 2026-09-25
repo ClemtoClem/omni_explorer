@@ -64,7 +64,7 @@ void main() {
     final zip = arc.Archive()
       ..addFile(arc.ArchiveFile('word/document.xml', 3, 'abc'.codeUnits));
     final f = File(p.join(sandbox.path, 'rapport.docx'))
-      ..writeAsBytesSync(arc.ZipEncoder().encode(zip)!);
+      ..writeAsBytesSync(arc.ZipEncoder().encode(zip));
     await h.openEditor(tester, editor, f.path);
 
     expect(tab().viewMode, EditorViewMode.hex);

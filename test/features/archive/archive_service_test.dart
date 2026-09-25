@@ -30,7 +30,7 @@ void main() {
     final archive = arc.Archive();
     files.forEach(archive.addFile);
     final path = p.join(sandbox.path, 'test.zip');
-    await File(path).writeAsBytes(arc.ZipEncoder().encode(archive)!);
+    await File(path).writeAsBytes(arc.ZipEncoder().encode(archive));
     return path;
   }
 
@@ -39,7 +39,7 @@ void main() {
     files.forEach(archive.addFile);
     final tar = arc.TarEncoder().encode(archive);
     final path = p.join(sandbox.path, 'test.tar.gz');
-    await File(path).writeAsBytes(arc.GZipEncoder().encode(tar)!);
+    await File(path).writeAsBytes(const arc.GZipEncoder().encode(tar));
     return path;
   }
 
@@ -99,9 +99,7 @@ void main() {
     });
 
     test('ne recrée jamais les liens symboliques de l\'archive', () async {
-      final link = arc.ArchiveFile('link', 0, <int>[])
-        ..isSymbolicLink = true
-        ..nameOfLinkedFile = outside;
+      final link = arc.ArchiveFile.symlink('link', outside);
       final tgz = await writeTarGz([link, _file('link/evil.txt', 'x')]);
 
       final result = await ArchiveService.extractAll(tgz, dest);
@@ -126,7 +124,8 @@ void main() {
 
     test('.gz : refuse d\'écraser la cible d\'un lien existant', () async {
       final gz = p.join(sandbox.path, 'note.txt.gz');
-      await File(gz).writeAsBytes(arc.GZipEncoder().encode('new'.codeUnits)!);
+      await File(gz)
+          .writeAsBytes(const arc.GZipEncoder().encode('new'.codeUnits));
       final victim = File(p.join(outside, 'victim.txt'))
         ..writeAsStringSync('original');
       await Directory(dest).create();
@@ -139,7 +138,8 @@ void main() {
 
     test('.gz : extrait le fichier décompressé', () async {
       final gz = p.join(sandbox.path, 'note.txt.gz');
-      await File(gz).writeAsBytes(arc.GZipEncoder().encode('hello'.codeUnits)!);
+      await File(gz)
+          .writeAsBytes(const arc.GZipEncoder().encode('hello'.codeUnits));
 
       final result = await ArchiveService.extractAll(gz, dest);
 
@@ -223,7 +223,8 @@ void main() {
 
     test('.gz : conflit « ignorer »', () async {
       final gz = p.join(sandbox.path, 'note.txt.gz');
-      await File(gz).writeAsBytes(arc.GZipEncoder().encode('new'.codeUnits)!);
+      await File(gz)
+          .writeAsBytes(const arc.GZipEncoder().encode('new'.codeUnits));
       await Directory(dest).create();
       File(p.join(dest, 'note.txt')).writeAsStringSync('existant');
 
@@ -277,6 +278,21 @@ void main() {
               .map((e) => p.basename(e.path))
               .where((n) => n.contains('.tmp-')),
           isEmpty);
+    });
+
+    test('un dossier vide reste un dossier dans l\'archive créée', () async {
+      final dir = p.join(sandbox.path, 'projet');
+      await Directory(p.join(dir, 'vide')).create(recursive: true);
+      File(p.join(dir, 'a.txt')).writeAsStringSync('a');
+      final zip = p.join(sandbox.path, 'projet.zip');
+
+      await ArchiveService.createZip(zip, [dir]);
+      final entries = await ArchiveService.listEntries(zip);
+      final vide = entries.singleWhere((e) => e.fullPath == 'projet/vide');
+
+      expect(vide.isDirectory, isTrue);
+      await ArchiveService.extractAll(zip, dest);
+      expect(Directory(p.join(dest, 'projet', 'vide')).existsSync(), isTrue);
     });
 
     test('TAR.GZ : création lisible', () async {
