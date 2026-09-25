@@ -140,3 +140,15 @@ class ArchiveOpException implements Exception {
   @override
   String toString() => message;
 }
+
+/// Bilan d'une extraction.
+class ExtractResult {
+  /// Nombre de fichiers écrits.
+  final int filesWritten;
+
+  /// Entrées « lien symbolique » ignorées : elles pourraient pointer hors du
+  /// dossier de destination, elles ne sont donc jamais recréées.
+  final int skippedLinks;
+
+  const ExtractResult({this.filesWritten = 0, this.skippedLinks = 0});
+}

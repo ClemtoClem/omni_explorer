@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart' as arc;
 import 'package:path/path.dart' as p;
+import '../../../core/utils/safe_path.dart';
 import '../models/archive_entry.dart';
 
 typedef _ByteDecoder = List<int> Function(List<int>);
@@ -216,166 +217,216 @@ class ArchiveService {
 
   // ── Extraction ────────────────────────────────────────────────────────────
 
-  static Future<void> extractAll(
+  /// Extrait toute l'archive dans [destDir].
+  ///
+  /// Sécurité (« Zip Slip ») : tous les noms d'entrée sont validés AVANT la
+  /// moindre écriture ; une seule entrée dangereuse (`..`, chemin absolu…)
+  /// fait refuser toute l'archive. Les liens symboliques contenus dans
+  /// l'archive ne sont jamais recréés (voir [ExtractResult.skippedLinks]).
+  static Future<ExtractResult> extractAll(
     String archivePath,
     String destDir, {
     String? password,
     void Function(double)? onProgress,
   }) async {
-    await Directory(destDir).create(recursive: true);
     final type = detectType(archivePath);
-    final bytes = await File(archivePath).readAsBytes();
-
     switch (type) {
-      case ArchiveType.zip:
-      case ArchiveType.jar:
-        final archive = arc.ZipDecoder().decodeBytes(bytes, password: password);
-        await _writeArchive(archive, destDir, onProgress);
-        break;
-      case ArchiveType.tar:
-        await _writeArchive(arc.TarDecoder().decodeBytes(bytes), destDir, onProgress);
-        break;
-      case ArchiveType.tarGz:
-        await _writeArchive(
-            arc.TarDecoder().decodeBytes(arc.GZipDecoder().decodeBytes(bytes)),
-            destDir, onProgress);
-        break;
-      case ArchiveType.tarBz2:
-        await _writeArchive(
-            arc.TarDecoder().decodeBytes(arc.BZip2Decoder().decodeBytes(bytes)),
-            destDir, onProgress);
-        break;
-      case ArchiveType.tarXz:
-        await _writeArchive(
-            arc.TarDecoder().decodeBytes(arc.XZDecoder().decodeBytes(bytes)),
-            destDir, onProgress);
-        break;
-      case ArchiveType.gz:
-        await _writeSingle(path: archivePath,
-            decoded: arc.GZipDecoder().decodeBytes(bytes), destDir: destDir);
-        break;
-      case ArchiveType.bz2:
-        await _writeSingle(path: archivePath,
-            decoded: arc.BZip2Decoder().decodeBytes(bytes), destDir: destDir);
-        break;
-      case ArchiveType.xz:
-        await _writeSingle(path: archivePath,
-            decoded: arc.XZDecoder().decodeBytes(bytes), destDir: destDir);
-        break;
       case ArchiveType.sevenZip:
-        await _extract7z(archivePath, destDir, password: password);
-        break;
+        return _extract7z(archivePath, destDir, password: password);
       case ArchiveType.rar:
-        await _extractRar(archivePath, destDir, password: password);
-        break;
+        return _extractRar(archivePath, destDir, password: password);
       case ArchiveType.unknown:
         throw const ArchiveOpException('Format d\'archive non reconnu.');
+      default:
+        break;
+    }
+
+    final bytes = await File(archivePath).readAsBytes();
+    switch (type) {
+      case ArchiveType.gz:
+        return _writeSingle(path: archivePath,
+            decoded: arc.GZipDecoder().decodeBytes(bytes), destDir: destDir);
+      case ArchiveType.bz2:
+        return _writeSingle(path: archivePath,
+            decoded: arc.BZip2Decoder().decodeBytes(bytes), destDir: destDir);
+      case ArchiveType.xz:
+        return _writeSingle(path: archivePath,
+            decoded: arc.XZDecoder().decodeBytes(bytes), destDir: destDir);
+      default:
+        final archive = _decodeMulti(type, bytes, password: password);
+        return _writeArchive(archive.files, destDir, onProgress);
     }
   }
 
-  static Future<void> _writeArchive(
-    arc.Archive archive,
+  /// Décode une archive multi-fichiers (ZIP/JAR/TAR/TAR.*) déjà lue.
+  static arc.Archive _decodeMulti(
+    ArchiveType type,
+    List<int> bytes, {
+    String? password,
+  }) {
+    switch (type) {
+      case ArchiveType.zip:
+      case ArchiveType.jar:
+        return arc.ZipDecoder().decodeBytes(bytes, password: password);
+      case ArchiveType.tar:
+        return arc.TarDecoder().decodeBytes(bytes);
+      case ArchiveType.tarGz:
+        return arc.TarDecoder().decodeBytes(arc.GZipDecoder().decodeBytes(bytes));
+      case ArchiveType.tarBz2:
+        return arc.TarDecoder().decodeBytes(arc.BZip2Decoder().decodeBytes(bytes));
+      case ArchiveType.tarXz:
+        return arc.TarDecoder().decodeBytes(arc.XZDecoder().decodeBytes(bytes));
+      default:
+        throw ArchiveOpException('Format non géré ici : $type');
+    }
+  }
+
+  /// Valide tous les [names] (sans écrire) : lève [ArchiveOpException] au
+  /// premier nom qui sortirait de [destDir].
+  static void _validateNames(String destDir, Iterable<String> names) {
+    for (final name in names) {
+      _guard(() => SafePath.resolveWithin(destDir, name));
+    }
+  }
+
+  /// Traduit un [UnsafePathException] en message d'archive pour l'utilisateur.
+  static T _guard<T>(T Function() body) {
+    try {
+      return body();
+    } on UnsafePathException catch (e) {
+      throw ArchiveOpException(
+          'Archive refusée : l\'entrée « ${e.entry} » est dangereuse '
+          '(${e.reason}). Rien n\'a été extrait.');
+    }
+  }
+
+  static Future<T> _guardAsync<T>(Future<T> Function() body) async {
+    try {
+      return await body();
+    } on UnsafePathException catch (e) {
+      throw ArchiveOpException(
+          'Extraction interrompue : l\'entrée « ${e.entry} » est dangereuse '
+          '(${e.reason}).');
+    }
+  }
+
+  static Future<ExtractResult> _writeArchive(
+    List<arc.ArchiveFile> files,
     String dest,
     void Function(double)? onProgress,
   ) async {
-    final total = archive.files.length;
-    var done = 0;
-    for (final file in archive.files) {
-      final filePath = p.join(dest, file.name);
-      if (file.isFile) {
-        final f = File(filePath);
-        await f.parent.create(recursive: true);
-        await f.writeAsBytes(file.content as List<int>);
+    // 1. Validation lexicale de TOUTES les entrées avant d'écrire quoi que
+    //    ce soit : une archive piégée est refusée en bloc.
+    _validateNames(dest, files.map((f) => f.name));
+
+    // 2. Écriture ; la racine vérifie en plus les liens symboliques déjà
+    //    présents sur le disque.
+    final root = await SafeExtractionRoot.open(dest);
+    final total = files.length;
+    var done = 0, written = 0, skippedLinks = 0;
+    for (final file in files) {
+      if (file.isSymbolicLink) {
+        skippedLinks++;
+      } else if (file.isFile) {
+        final path = await _guardAsync(() => root.prepareFile(file.name));
+        await File(path).writeAsBytes(file.content as List<int>);
+        written++;
       } else {
-        await Directory(filePath).create(recursive: true);
+        await _guardAsync(() => root.prepareDirectory(file.name));
       }
       done++;
       onProgress?.call(done / total);
     }
+    return ExtractResult(filesWritten: written, skippedLinks: skippedLinks);
   }
 
-  static Future<void> _writeSingle({
+  static Future<ExtractResult> _writeSingle({
     required String path,
     required List<int> decoded,
     required String destDir,
   }) async {
-    final name = p.basenameWithoutExtension(path);
-    await File(p.join(destDir, name)).writeAsBytes(decoded);
+    // Nom dérivé du fichier local (pas de l'archive), vérifié quand même :
+    // un lien symbolique existant à cet emplacement serait suivi.
+    final root = await SafeExtractionRoot.open(destDir);
+    final out = await _guardAsync(
+        () => root.prepareFile(p.basenameWithoutExtension(path)));
+    await File(out).writeAsBytes(decoded);
+    return const ExtractResult(filesWritten: 1);
   }
 
-  static Future<void> _extract7z(
+  // Pour 7z/RAR, l'extraction est faite par l'outil externe : on liste
+  // d'abord les entrées et on refuse l'archive si un nom est dangereux.
+  // Limite : les liens symboliques contenus dans ces archives ne sont pas
+  // détectés par la liste (on s'appuie sur les protections de 7-Zip/unrar).
+
+  static Future<ExtractResult> _extract7z(
     String path,
     String dest, {
     String? password,
   }) async {
     final cmd = await find7z();
     if (cmd == null) throw const ArchiveOpException('p7zip non installé.');
+    final entries = await _list7z(path, password: password);
+    _validateNames(dest, entries.map((e) => e.fullPath));
+    await Directory(dest).create(recursive: true);
     final args = ['x', '-y', '-o$dest', if (password != null) '-p$password', '--', path];
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
+    return ExtractResult(
+        filesWritten: entries.where((e) => !e.isDirectory).length);
   }
 
-  static Future<void> _extractRar(
+  static Future<ExtractResult> _extractRar(
     String path,
     String dest, {
     String? password,
   }) async {
     final cmd = await findUnrar();
     if (cmd == null) throw const ArchiveOpException('unrar non installé.');
+    final entries = await _listRar(path, password: password);
+    _validateNames(dest, entries.map((e) => e.fullPath));
+    await Directory(dest).create(recursive: true);
     final args = ['x', '-y', if (password != null) '-p$password', path, '$dest/'];
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur unrar : ${r.stderr}');
+    return ExtractResult(
+        filesWritten: entries.where((e) => !e.isDirectory).length);
   }
 
   // ── Extraction d'une entrée individuelle ──────────────────────────────────
 
-  static Future<void> extractEntry(
+  /// Extrait l'entrée [entryPath] (fichier, ou dossier avec son contenu).
+  static Future<ExtractResult> extractEntry(
     String archivePath,
     String entryPath,
     String destDir, {
     String? password,
   }) async {
     final type = detectType(archivePath);
-    final bytes = await File(archivePath).readAsBytes();
-    arc.Archive archive;
-
     switch (type) {
       case ArchiveType.zip:
       case ArchiveType.jar:
-        archive = arc.ZipDecoder().decodeBytes(bytes, password: password);
-        break;
       case ArchiveType.tar:
-        archive = arc.TarDecoder().decodeBytes(bytes);
-        break;
       case ArchiveType.tarGz:
-        archive = arc.TarDecoder().decodeBytes(arc.GZipDecoder().decodeBytes(bytes));
-        break;
       case ArchiveType.tarBz2:
-        archive = arc.TarDecoder().decodeBytes(arc.BZip2Decoder().decodeBytes(bytes));
-        break;
       case ArchiveType.tarXz:
-        archive = arc.TarDecoder().decodeBytes(arc.XZDecoder().decodeBytes(bytes));
         break;
       default:
-        // Pour 7z/RAR, extraire tout dans un sous-dossier
-        await extractAll(archivePath, destDir, password: password);
-        return;
+        // Formats mono-fichier et 7z/RAR : extraction complète.
+        return extractAll(archivePath, destDir, password: password);
     }
 
-    for (final file in archive.files) {
-      final norm = file.name.endsWith('/')
-          ? file.name.substring(0, file.name.length - 1)
-          : file.name;
-      if (!norm.startsWith(entryPath)) continue;
-      final filePath = p.join(destDir, file.name);
-      if (file.isFile) {
-        final f = File(filePath);
-        await f.parent.create(recursive: true);
-        await f.writeAsBytes(file.content as List<int>);
-      } else {
-        await Directory(filePath).create(recursive: true);
-      }
-    }
+    final bytes = await File(archivePath).readAsBytes();
+    final archive = _decodeMulti(type, bytes, password: password);
+    // L'entrée elle-même ou ses descendants — et non tout nom qui commence
+    // par les mêmes caractères (« doc » ne doit pas inclure « docs/… »).
+    final selected = archive.files.where((f) {
+      final norm = f.name.endsWith('/')
+          ? f.name.substring(0, f.name.length - 1)
+          : f.name;
+      return norm == entryPath || norm.startsWith('$entryPath/');
+    }).toList();
+    return _writeArchive(selected, destDir, null);
   }
 
   // ── Création d'archive ────────────────────────────────────────────────────
