@@ -1051,3 +1051,128 @@ Branche : `p1/vault-export`
   appellent l'est.
 - À vérifier sur téléphone : l'enregistrement via le sélecteur Android et
   l'import depuis un autre appareil.
+
+### P1.3 : archives et paquets — formats, navigation, édition, doublons
+
+Branche : `p1/archives`
+
+**Demande** : empaqueter et désarchiver « n'importe quel format » ; corriger
+l'arborescence dans une archive ; ajouter, déplacer, renommer et dupliquer
+comme dans l'explorateur ; mettre à jour une archive depuis un dossier ;
+numéroter les doublons (`nom.1.ext`) ou demander s'il faut écraser ou
+ignorer, à l'extraction comme lors des déplacements ; dupliquer
+(`nom.copy.N.ext`).
+
+**Ce qui est possible, et pourquoi**
+
+| Format | Lire / extraire | Créer | Modifier |
+|---|---|---|---|
+| ZIP et dérivés (`.jar`, `.apk`, `.docx`, `.odt`, `.epub`…) | oui | oui, chiffrement AES possible | oui |
+| TAR, TAR.GZ, TAR.BZ2 | oui | oui | oui |
+| GZ, BZ2 (fichier unique) | oui | oui (un fichier) | — |
+| TAR.XZ, XZ | oui | non | non |
+| 7z | Linux, avec `7z` installé | Linux | non |
+| RAR | Linux, avec `unrar` | **impossible** | non |
+
+- **RAR** : format propriétaire, aucun outil libre ne sait l'écrire, et
+  `unrar` n'est pas libre (F-Droid).
+- **XZ** : l'encodeur du paquet `archive` n'écrit que des données **non
+  compressées** (précisé dans sa documentation) ; réécrire un `.tar.xz`
+  le ferait gonfler en silence, d'où la lecture seule.
+- **7z sous Android** : il faudrait une bibliothèque native (libarchive, par
+  exemple) ; c'est un chantier à part.
+
+**Doublons et conflits** (`lib/core/utils/file_naming.dart`)
+- Conflit (extraction, déplacement, copie vers un autre dossier) : au choix
+  **Renommer** (`rapport.1.txt`, puis `rapport.2.txt`…), **Remplacer** ou
+  **Ignorer**, avec « Appliquer aux éléments suivants ».
+- **Dupliquer** (explorateur et archives) : `rapport.copy.1.txt`,
+  `rapport.copy.2.txt`… Dupliquer une copie reprend la numérotation de
+  l'original. Copier un élément dans son propre dossier est une duplication.
+- Doubles extensions respectées (`site.1.tar.gz`) ; dossiers et fichiers
+  cachés : suffixe à la fin (`photos.1`, `.bashrc.1`). Remplace l'ancien
+  suffixe « (copie) ».
+
+**Arborescence : les erreurs d'affichage** (`models/archive_tree.dart`)
+1. La liste visible était triée d'un bloc (dossiers d'abord, puis par
+   nom) : les fichiers s'éloignaient de leur dossier.
+2. Beaucoup d'archives ne listent que `a/b/c.txt`, sans entrée pour `a/`
+   ni `a/b/` : ces dossiers n'existaient pas, et leur contenu était
+   inaccessible.
+3. Chemins hétérogènes (`./`, `\`, `//`, `/` initial).
+
+`ArchiveTree` normalise les chemins, recrée les dossiers implicites et liste
+chaque dossier séparément. L'écran passe à une navigation **dossier par
+dossier**, comme l'explorateur : fil d'Ariane, et le retour arrière remonte
+d'un dossier.
+
+**Reconnaissance des formats** : par **signature binaire** (ZIP, GZip, BZip2,
+XZ, 7z, RAR, TAR). Pour TAR, la marque `ustar` ou une **somme de contrôle
+d'en-tête valide**, ce qui couvre l'ancien format V7 que produit le paquet
+`archive` lui-même. Les fichiers dérivés de ZIP et les archives mal nommées
+sont reconnus.
+
+**Modifier une archive** (`services/archive_document.dart`)
+- Ajouter des fichiers ou un dossier du disque (un dossier déjà présent est
+  fusionné ; les liens symboliques ne sont pas ajoutés), nouveau dossier,
+  renommer, déplacer (vers un dossier de l'archive, avec gestion des
+  conflits), dupliquer, supprimer.
+- **Mettre à jour depuis un dossier**, pour les sauvegardes de projet :
+  ajoute les fichiers absents, remplace ceux dont le contenu diffère
+  (comparaison du contenu, pas de la date), **ne supprime rien**.
+  Exclusions possibles (`build`, `.dart_tool`, `node_modules`…).
+- Mot de passe ZIP : chiffrement **AES, natif sur toutes les plateformes**
+  (auparavant via 7z, donc impossible sur Android). Un mot de passe absent
+  ou faux est détecté dès l'ouverture, par contrôle du CRC32 d'un fichier.
+- Enregistrement atomique après chaque opération. En cas d'échec,
+  l'archive est relue depuis le disque : rien n'est à moitié appliqué.
+
+**Créer une archive** (`widgets/compress_dialog.dart`,
+`ArchiveService.createArchive`) : ZIP (AES en option), TAR, TAR.GZ, TAR.BZ2,
+GZ ou BZ2 pour un fichier unique, 7z sous Linux. Les liens symboliques ne
+sont plus suivis : un lien vers un dossier parent faisait boucler la
+création.
+
+**Autres corrections**
+- `extractEntry` compare des chemins normalisés : `./src/a.txt` était
+  introuvable sous `src`.
+- Code mort retiré : `addFilesToZip`, `removeFromZip`, `setPassword`,
+  `removePassword`, que remplace `ArchiveDocument`. L'ancien écran (1 238
+  lignes) est remplacé ; la boîte de création passe dans son propre fichier.
+- Tests : délai maximal des attentes porté de 10 s à 30 s (plafond
+  seulement). Deux tests échouaient parfois quand plusieurs suites
+  tournaient en parallèle, dont celui de l'éditeur, déjà vu une fois en
+  P0.5. Le test d'interface du coffre attend désormais la fermeture réelle
+  de l'écran d'édition.
+- Un commit de pur formatage (`style(archive): …`) est séparé des
+  changements fonctionnels.
+
+**Validation**
+- 58 nouveaux tests :
+  - nommage (13), duplication dans l'explorateur (3) ;
+  - arborescence (6), reconnaissance des formats (4) ;
+  - document (15), dont les modifications et la mise à jour depuis un
+    dossier **pour chacun des quatre formats modifiables**, les conflits, le
+    ZIP AES et la lecture seule ;
+  - écran (5 tests de widget) : navigation dans une archive sans entrées de
+    dossier, fil d'Ariane et retour, dupliquer puis supprimer (vérifié dans
+    le fichier), recherche, lecture seule, mot de passe.
+- Tests de mutation : pas de dossiers implicites, tri global, contenu
+  toujours jugé identique, conflit de déplacement ignoré, numéro placé après
+  l'extension, pas de reprise de numérotation, retour arrière qui quitte
+  l'écran : chacun de ces sabotages fait échouer des tests.
+- `flutter test` : 274 tests réussis, **6 exécutions complètes consécutives**
+  après la correction des attentes. `flutter analyze` : 0 erreur,
+  0 avertissement (12 remarques de style préexistantes). `flutter build apk
+  --debug` et `flutter build linux --debug` : réussis.
+
+**Limites et suite**
+- Les archives sont chargées entièrement en mémoire, à l'ouverture comme à
+  l'enregistrement : le streaming des très grosses archives reste prévu en
+  P2.
+- Les actions qui passent par le sélecteur de fichiers (ajouter, mettre à
+  jour, extraire vers) ne sont pas couvertes par des tests de widget ; les
+  opérations qu'elles appellent le sont.
+- Ouvrir un fichier contenu dans l'archive sans l'extraire n'est pas encore
+  possible (seules les actions d'extraction le permettent).
+- 7z et RAR restent en lecture seule, et sous Linux uniquement.
