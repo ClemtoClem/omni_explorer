@@ -43,3 +43,24 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# ── OmniExplorer ──────────────────────────────────────────────────────────────
+# Build outputs and Gradle/Kotlin caches, including those of vendored packages.
+**/android/build/
+**/android/.gradle/
+**/android/.kotlin/
+**/android/local.properties
+**/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# Local source snapshots / archives dropped at the repo root.
+/*.zip
+
+# Secrets: signing keys, keystore config, environment files. Never commit them;
+# CI reads them from repository secrets (see README).
+key.properties
+*.keystore
+*.jks
+*.p12
+.env
+.env.*
