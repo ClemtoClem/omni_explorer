@@ -221,3 +221,76 @@ Branche : `p0/repo-hygiene`
   lors de l'audit des dépendances (P2) : accepter la GPL ou passer à une
   variante LGPL.
 - Pas encore de hook ni de CI qui bloque un commit de secret : prévu en P2.
+
+### P0.1 : protection contre les archives malveillantes (« Zip Slip »)
+
+Branche : `p0/zip-slip`
+
+**Problème (CRITIQUE)**
+L'extraction écrivait chaque entrée à `p.join(destination, nomDeLEntrée)`
+sans aucune vérification. Une archive piégée (téléchargée, reçue par
+messagerie…) pouvait donc écrire n'importe où, puisque l'application dispose
+de l'accès à tous les fichiers :
+- `../../DCIM/photo.jpg` remonte au-dessus du dossier choisi ;
+- `/storage/emulated/0/…` : avec un chemin absolu, `p.join` ignore
+  complètement la destination ;
+- un lien symbolique déjà présent dans la destination faisait écrire
+  ailleurs.
+
+Défaut connexe : l'écran d'archive affichait « Extrait dans … » même quand
+l'extraction venait d'échouer.
+
+**Modifications**
+- Nouveau `lib/core/utils/safe_path.dart`, réutilisable (il servira aussi au
+  serveur Go Live) :
+  - `SafePath.resolveWithin(racine, entrée)` : validation lexicale. Sont
+    refusés `..` (même `a/../b`), les chemins absolus, les lettres de lecteur
+    (`C:`), les chemins UNC et le caractère nul ; `\` compte comme un
+    séparateur.
+  - `SafeExtractionRoot` : avant de créer le moindre dossier, résout le chemin
+    réel du plus proche dossier existant et vérifie qu'il reste dans la
+    racine réelle. Une destination qui est elle-même un lien (`/sdcard`)
+    reste acceptée. Refuse d'écrire sur un emplacement occupé par un lien.
+- `ArchiveService` (ZIP, JAR, TAR, TAR.GZ/BZ2/XZ, GZ/BZ2/XZ) :
+  - **tout ou rien** : tous les noms sont validés avant d'écrire quoi que ce
+    soit ; une seule entrée dangereuse fait refuser l'archive entière, avec un
+    message qui la nomme ;
+  - les liens symboliques contenus dans l'archive ne sont jamais recréés ;
+    leur nombre est signalé à l'utilisateur ;
+  - 7z et RAR : la liste des entrées est validée avant de lancer l'outil
+    externe ;
+  - `extractAll` et `extractEntry` renvoient un `ExtractResult` (fichiers
+    écrits, liens ignorés) ;
+  - `extractEntry` : l'entrée `doc` n'embarque plus aussi `docs/…` (la
+    sélection se faisait sur le préfixe de caractères) ;
+  - le décodage, qui était dupliqué, est regroupé dans `_decodeMulti`.
+- Écran d'archive et menu de l'explorateur : le succès n'est annoncé que si
+  l'extraction a réellement réussi.
+
+**Validation**
+- 32 nouveaux tests : `test/core/utils/safe_path_test.dart` et
+  `test/features/archive/archive_service_test.dart`. Ils utilisent de vraies
+  archives piégées (ZIP et TAR.GZ : `..`, `..\`, chemin absolu, lien
+  symbolique dans l'archive), de vrais liens symboliques dans la destination,
+  et vérifient que rien n'est écrit hors du dossier.
+- Test de mutation : avec les refus de `..` et des chemins absolus
+  désactivés, les tests ZIP échouent. Les tests TAR.GZ restent verts grâce à
+  la seconde couche (vérification du chemin réel sur le disque) : les deux
+  protections fonctionnent indépendamment.
+- `flutter test` : 33 tests réussis. `flutter analyze` : 0 erreur,
+  0 avertissement (12 remarques de style préexistantes).
+- `flutter build apk --debug` : réussi.
+
+**Limites et suite**
+- 7z et RAR : les liens symboliques contenus dans ces archives ne sont pas
+  visibles dans la liste ; on s'appuie alors sur les protections de
+  7-Zip/unrar. Ces formats ne fonctionnent de toute façon que sur Linux et
+  Windows (outil externe requis).
+- Une vérification sur disque suivie d'une écriture laisse une fenêtre de
+  concurrence théorique (un autre processus modifiant la destination pendant
+  l'extraction) ; elle est acceptable pour une application mobile
+  mono-utilisateur.
+- Les fichiers déjà présents dans la destination sont encore écrasés sans
+  confirmation : c'est la gestion des conflits, prévue en P0.3.
+- Les archives sont toujours chargées entièrement en mémoire : c'est le
+  streaming, prévu en P2.
