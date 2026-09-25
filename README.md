@@ -1148,10 +1148,10 @@ création.
   changements fonctionnels.
 
 **Validation**
-- 58 nouveaux tests :
-  - nommage (13), duplication dans l'explorateur (3) ;
+- 43 nouveaux tests :
+  - nommage (11), duplication dans l'explorateur (3) ;
   - arborescence (6), reconnaissance des formats (4) ;
-  - document (15), dont les modifications et la mise à jour depuis un
+  - document (14), dont les modifications et la mise à jour depuis un
     dossier **pour chacun des quatre formats modifiables**, les conflits, le
     ZIP AES et la lecture seule ;
   - écran (5 tests de widget) : navigation dans une archive sans entrées de
