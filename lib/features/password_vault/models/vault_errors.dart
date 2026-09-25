@@ -43,3 +43,15 @@ class VaultKeyDerivationException extends VaultException {
       : super('Impossible de dériver la clé du coffre (mémoire '
             'insuffisante ?).');
 }
+
+/// Le fichier choisi pour l'import n'est pas un export du coffre-fort.
+class NotAnExportException extends VaultException {
+  const NotAnExportException()
+      : super('Ce fichier n\'est pas un export de coffre-fort OmniExplorer.');
+}
+
+/// Fichier d'import trop volumineux pour être un export de coffre.
+class ExportTooLargeException extends VaultException {
+  const ExportTooLargeException()
+      : super('Fichier trop volumineux pour être un export de coffre-fort.');
+}

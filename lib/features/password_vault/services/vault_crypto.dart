@@ -99,7 +99,24 @@ class VaultCrypto {
   });
 
   static const int formatVersion = 1;
+
+  /// Signature du fichier du coffre.
   static final Uint8List magic = Uint8List.fromList(utf8.encode('OMNIVLT1'));
+
+  /// Signature d'un export (même format, même chiffrement) : un export ne
+  /// peut pas être pris pour le coffre, ni l'inverse.
+  static final Uint8List exportMagic =
+      Uint8List.fromList(utf8.encode('OMNIEXP1'));
+
+  /// Vrai si [bytes] commence par la signature [expected].
+  static bool hasMagic(Uint8List bytes, Uint8List expected) {
+    if (bytes.length < expected.length) return false;
+    for (var i = 0; i < expected.length; i++) {
+      if (bytes[i] != expected[i]) return false;
+    }
+    return true;
+  }
+
   static const String _cipher = 'xchacha20poly1305-ietf';
 
   /// Taille maximale d'en-tête acceptée (protection contre un fichier forgé).
@@ -163,13 +180,16 @@ class VaultCrypto {
   // ── Scellement ──────────────────────────────────────────────────────────
 
   /// Produit les octets du fichier : [content] chiffré avec [dek], et [dek]
-  /// chiffrée avec [kek] (dérivée avec [kdf]).
+  /// chiffrée avec [kek] (dérivée avec [kdf]). [signature] distingue le
+  /// coffre ([magic]) d'un export ([exportMagic]).
   Uint8List seal({
     required VaultContent content,
     required SecureKey dek,
     required SecureKey kek,
     required KdfParams kdf,
+    Uint8List? signature,
   }) {
+    final head = signature ?? magic;
     final wrapNonce = sodium.randombytes.buf(_aead.nonceBytes);
     final dekBytes = dek.extractBytes();
     final Uint8List wrappedKey;
@@ -196,7 +216,7 @@ class VaultCrypto {
     }));
 
     final prefix = BytesBuilder(copy: false)
-      ..add(magic)
+      ..add(head)
       ..add((ByteData(4)..setUint32(0, header.length)).buffer.asUint8List())
       ..add(header);
     final aad = prefix.toBytes();
@@ -216,19 +236,19 @@ class VaultCrypto {
 
   // ── Ouverture ───────────────────────────────────────────────────────────
 
-  /// Valide la structure de [bytes] sans rien déchiffrer.
-  VaultFile parse(Uint8List bytes) {
-    final headerStart = magic.length + 4;
+  /// Valide la structure de [bytes] sans rien déchiffrer. [signature] :
+  /// [magic] (coffre, par défaut) ou [exportMagic].
+  VaultFile parse(Uint8List bytes, {Uint8List? signature}) {
+    final head = signature ?? magic;
+    final headerStart = head.length + 4;
     if (bytes.length < headerStart) {
       throw const VaultCorruptedException('fichier trop court');
     }
-    for (var i = 0; i < magic.length; i++) {
-      if (bytes[i] != magic[i]) {
-        throw const VaultCorruptedException('signature absente');
-      }
+    if (!hasMagic(bytes, head)) {
+      throw const VaultCorruptedException('signature absente');
     }
     final headerLen =
-        ByteData.sublistView(bytes, magic.length, headerStart).getUint32(0);
+        ByteData.sublistView(bytes, head.length, headerStart).getUint32(0);
     if (headerLen == 0 ||
         headerLen > _maxHeaderBytes ||
         headerStart + headerLen > bytes.length) {

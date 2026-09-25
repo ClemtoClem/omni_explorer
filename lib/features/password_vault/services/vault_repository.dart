@@ -146,15 +146,7 @@ class VaultRepository {
     final invalid = validatePassword(next);
     if (invalid != null) throw WeakPasswordException(invalid);
 
-    // Vérifie le mot de passe actuel avec les paramètres du coffre ouvert.
-    final check = await crypto.deriveKey(current, vault._kdf);
-    try {
-      final same = check.runUnlockedSync(
-          (a) => vault._kek.runUnlockedSync((b) => _sodium.memcmp(a, b)));
-      if (!same) throw const WrongPasswordException();
-    } finally {
-      check.dispose();
-    }
+    await verifyPassword(vault, current);
 
     final kdf = crypto.newKdfParams();
     final kek = await crypto.deriveKey(next, kdf);
@@ -173,6 +165,70 @@ class VaultRepository {
       .._kek = kek
       .._dek = dek
       .._kdf = kdf;
+  }
+
+  /// Vérifie que [password] est le mot de passe maître du coffre ouvert
+  /// (comparaison des clés en temps constant). Lève
+  /// [WrongPasswordException] sinon.
+  Future<void> verifyPassword(UnlockedVault vault, String password) async {
+    _checkOpen(vault);
+    final check = await crypto.deriveKey(password, vault._kdf);
+    try {
+      final same = check.runUnlockedSync(
+          (a) => vault._kek.runUnlockedSync((b) => _sodium.memcmp(a, b)));
+      if (!same) throw const WrongPasswordException();
+    } finally {
+      check.dispose();
+    }
+  }
+
+  // ── Export / import ─────────────────────────────────────────────────────
+
+  /// Taille maximale d'un fichier d'import (un export de plusieurs milliers
+  /// d'entrées reste très en deçà).
+  static const int maxExportBytes = 32 * 1024 * 1024;
+
+  /// Paquet d'export du coffre ouvert, protégé par son mot de passe maître.
+  /// [password] doit être ressaisi : il est vérifié avant l'export.
+  ///
+  /// Même chiffrement que le coffre (Argon2id, XChaCha20-Poly1305), avec une
+  /// clé de données neuve et une signature d'export distincte.
+  Future<Uint8List> exportPackage(UnlockedVault vault, String password) async {
+    await verifyPassword(vault, password);
+    final dek = crypto.newDataKey();
+    try {
+      return crypto.seal(
+        content: vault.content,
+        dek: dek,
+        kek: vault._kek,
+        kdf: vault._kdf,
+        signature: VaultCrypto.exportMagic,
+      );
+    } finally {
+      dek.dispose();
+    }
+  }
+
+  /// Déchiffre le paquet d'export [bytes] avec [password] (mot de passe du
+  /// coffre qui l'a produit). Ne modifie rien.
+  Future<VaultContent> readExportPackage(
+      Uint8List bytes, String password) async {
+    if (bytes.length > maxExportBytes) throw const ExportTooLargeException();
+    if (!VaultCrypto.hasMagic(bytes, VaultCrypto.exportMagic)) {
+      throw const NotAnExportException();
+    }
+    final file = crypto.parse(bytes, signature: VaultCrypto.exportMagic);
+    final kek = await crypto.deriveKey(password, file.kdf);
+    try {
+      final dek = crypto.unwrapDataKey(file, kek);
+      try {
+        return crypto.openContent(file, dek);
+      } finally {
+        dek.dispose();
+      }
+    } finally {
+      kek.dispose();
+    }
   }
 
   /// Supprime définitivement le coffre et sa sauvegarde.

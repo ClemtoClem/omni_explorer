@@ -14,6 +14,7 @@ import '../models/vault_entry.dart';
 import '../models/vault_errors.dart';
 import '../providers/vault_session.dart';
 import '../services/vault_repository.dart';
+import '../widgets/vault_transfer_dialogs.dart';
 import 'vault_entry_screen.dart';
 
 class PasswordVaultHomeScreen extends StatefulWidget {
@@ -429,10 +430,14 @@ class _VaultListViewState extends State<_VaultListView> {
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
+              if (v == 'export') exportVault(context);
+              if (v == 'import') importVault(context);
               if (v == 'password') _changePassword(context);
               if (v == 'delete') _confirmDeleteVault(context);
             },
             itemBuilder: (_) => const [
+              PopupMenuItem(value: 'export', child: Text('Exporter…')),
+              PopupMenuItem(value: 'import', child: Text('Importer…')),
               PopupMenuItem(
                   value: 'password',
                   child: Text('Changer le mot de passe maître')),

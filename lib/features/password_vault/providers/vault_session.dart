@@ -10,6 +10,7 @@
 /// Verrouiller efface les clés de la mémoire et vide le presse-papiers.
 
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as p;
@@ -20,6 +21,7 @@ import 'package:uuid/uuid.dart';
 import '../models/vault_entry.dart';
 import '../models/vault_errors.dart';
 import '../services/secure_clipboard.dart';
+import '../services/vault_merge.dart';
 import '../services/vault_crypto.dart';
 import '../services/vault_repository.dart';
 
@@ -223,6 +225,31 @@ class VaultSession extends ChangeNotifier with WidgetsBindingObserver {
         touch();
       });
 
+  // ── Export / import ─────────────────────────────────────────────────────
+
+  /// Paquet d'export protégé par le mot de passe maître, qui doit être
+  /// ressaisi ([password]).
+  Future<Uint8List> exportPackage(String password) => _run(() async {
+        final bytes = await _repo!.exportPackage(_requireOpen(), password);
+        touch();
+        return bytes;
+      });
+
+  /// Déchiffre le paquet [bytes] avec [password] et analyse ce qu'il
+  /// apporterait. Ne modifie rien.
+  Future<ImportPlan> previewImport(Uint8List bytes, String password) =>
+      _run(() async {
+        _requireOpen();
+        final content = await _repo!.readExportPackage(bytes, password);
+        touch();
+        return VaultMerge.plan(entries, content.entries);
+      });
+
+  /// Applique [plan] (issu de [previewImport]) et enregistre le coffre.
+  Future<void> applyImport(ImportPlan plan, ImportConflictChoice choice) =>
+      _saveEntries(VaultMerge.apply(entries, plan, choice,
+          newId: _uuid.v4, now: DateTime.now().toUtc()));
+
   /// Supprime définitivement le coffre (et sa sauvegarde).
   Future<void> deleteVault() => _run(() async {
         lock();
@@ -240,11 +267,11 @@ class VaultSession extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Exécute [body] en signalant l'occupation ; les erreurs du coffre
   /// ([VaultException]) sont propagées telles quelles pour l'interface.
-  Future<void> _run(Future<void> Function() body) async {
+  Future<T> _run<T>(Future<T> Function() body) async {
     busy = true;
     notifyListeners();
     try {
-      await body();
+      return await body();
     } finally {
       busy = false;
       notifyListeners();
