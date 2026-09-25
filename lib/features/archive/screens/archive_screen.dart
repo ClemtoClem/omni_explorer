@@ -8,6 +8,8 @@ import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/utils/file_utils.dart';
 import '../models/archive_entry.dart';
+import '../../../core/services/file_operations_service.dart';
+import '../../../core/widgets/file_op_dialogs.dart';
 import '../services/archive_service.dart';
 
 // ─── Écran d'archive ─────────────────────────────────────────────────────────
@@ -113,45 +115,43 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
 
   Future<void> _extractAll() async {
     final dest = await _pickDestDir();
-    if (dest == null) return;
+    if (dest == null || !mounted) return;
     var result = const ExtractResult();
     final ok = await _runOp(() async {
       result = await ArchiveService.extractAll(
         widget.archivePath, dest,
         password: _password,
         onProgress: (v) => setState(() => _operationProgress = v),
+        onConflict: askingConflictResolver(context),
       );
     });
     if (ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Extrait dans $dest${_skippedLinksNote(result)}')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Extrait dans $dest${result.notes}')));
     }
   }
-
-  /// Mention ajoutée au message de succès quand des liens ont été ignorés.
-  static String _skippedLinksNote(ExtractResult r) => r.skippedLinks == 0
-      ? ''
-      : ' (${r.skippedLinks} lien(s) symbolique(s) ignoré(s) par sécurité)';
 
   Future<void> _extractSelected() async {
     if (_selected.isEmpty) return;
     final dest = await _pickDestDir();
-    if (dest == null) return;
-    var skippedLinks = 0;
+    if (dest == null || !mounted) return;
+    var result = const ExtractResult();
+    // Un seul résolveur : « appliquer aux suivants » vaut pour toutes les
+    // entrées sélectionnées.
+    final onConflict = askingConflictResolver(context);
     final ok = await _runOp(() async {
       var done = 0;
       for (final ep in _selected) {
-        final r = await ArchiveService.extractEntry(
-            widget.archivePath, ep, dest, password: _password);
-        skippedLinks += r.skippedLinks;
+        result += await ArchiveService.extractEntry(
+            widget.archivePath, ep, dest,
+            password: _password, onConflict: onConflict);
         done++;
         setState(() => _operationProgress = done / _selected.length);
       }
     });
     if (ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Entrées extraites.'
-              '${_skippedLinksNote(ExtractResult(skippedLinks: skippedLinks))}')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Entrées extraites.${result.notes}')));
     }
     setState(() { _selected.clear(); _selectMode = false; });
   }
@@ -1198,6 +1198,11 @@ class _CompressDialogState extends State<_CompressDialog> {
     final name = _nameCtrl.text.trim();
     if (name.isEmpty) return;
     final ext  = _format.ext;
+    final invalid = FileNameValidator.validate('$name.$ext');
+    if (invalid != null) {
+      setState(() => _error = invalid);
+      return;
+    }
     final dest = p.join(widget.destDir, '$name.$ext');
     final pw   = (_withPassword && _pwCtrl.text.isNotEmpty) ? _pwCtrl.text : null;
     setState(() { _loading = true; _error = null; });

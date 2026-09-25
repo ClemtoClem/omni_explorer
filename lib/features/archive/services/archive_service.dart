@@ -2,6 +2,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:archive/archive.dart' as arc;
 import 'package:path/path.dart' as p;
+import '../../../core/services/file_operations_service.dart';
+import '../../../core/utils/atomic_write.dart';
 import '../../../core/utils/safe_path.dart';
 import '../models/archive_entry.dart';
 
@@ -223,11 +225,16 @@ class ArchiveService {
   /// moindre écriture ; une seule entrée dangereuse (`..`, chemin absolu…)
   /// fait refuser toute l'archive. Les liens symboliques contenus dans
   /// l'archive ne sont jamais recréés (voir [ExtractResult.skippedLinks]).
+  ///
+  /// Un fichier déjà présent n'est jamais écrasé sans décision : [onConflict]
+  /// choisit (sans résolveur, les deux sont gardés et le fichier extrait
+  /// reçoit un nom libre). 7z/RAR : renommage automatique.
   static Future<ExtractResult> extractAll(
     String archivePath,
     String destDir, {
     String? password,
     void Function(double)? onProgress,
+    ConflictResolver? onConflict,
   }) async {
     final type = detectType(archivePath);
     switch (type) {
@@ -245,16 +252,20 @@ class ArchiveService {
     switch (type) {
       case ArchiveType.gz:
         return _writeSingle(path: archivePath,
-            decoded: arc.GZipDecoder().decodeBytes(bytes), destDir: destDir);
+            decoded: arc.GZipDecoder().decodeBytes(bytes), destDir: destDir,
+            onConflict: onConflict);
       case ArchiveType.bz2:
         return _writeSingle(path: archivePath,
-            decoded: arc.BZip2Decoder().decodeBytes(bytes), destDir: destDir);
+            decoded: arc.BZip2Decoder().decodeBytes(bytes), destDir: destDir,
+            onConflict: onConflict);
       case ArchiveType.xz:
         return _writeSingle(path: archivePath,
-            decoded: arc.XZDecoder().decodeBytes(bytes), destDir: destDir);
+            decoded: arc.XZDecoder().decodeBytes(bytes), destDir: destDir,
+            onConflict: onConflict);
       default:
         final archive = _decodeMulti(type, bytes, password: password);
-        return _writeArchive(archive.files, destDir, onProgress);
+        return _writeArchive(archive.files, destDir, onProgress,
+            onConflict: onConflict);
     }
   }
 
@@ -313,8 +324,9 @@ class ArchiveService {
   static Future<ExtractResult> _writeArchive(
     List<arc.ArchiveFile> files,
     String dest,
-    void Function(double)? onProgress,
-  ) async {
+    void Function(double)? onProgress, {
+    ConflictResolver? onConflict,
+  }) async {
     // 1. Validation lexicale de TOUTES les entrées avant d'écrire quoi que
     //    ce soit : une archive piégée est refusée en bloc.
     _validateNames(dest, files.map((f) => f.name));
@@ -323,35 +335,66 @@ class ArchiveService {
     //    présents sur le disque.
     final root = await SafeExtractionRoot.open(dest);
     final total = files.length;
-    var done = 0, written = 0, skippedLinks = 0;
+    var done = 0, skippedLinks = 0;
+    var result = const ExtractResult();
     for (final file in files) {
       if (file.isSymbolicLink) {
         skippedLinks++;
       } else if (file.isFile) {
-        final path = await _guardAsync(() => root.prepareFile(file.name));
-        await File(path).writeAsBytes(file.content as List<int>);
-        written++;
+        result += await _writeEntry(
+            root, file.name, file.content as List<int>, onConflict);
       } else {
         await _guardAsync(() => root.prepareDirectory(file.name));
       }
       done++;
       onProgress?.call(done / total);
     }
-    return ExtractResult(filesWritten: written, skippedLinks: skippedLinks);
+    return result + ExtractResult(skippedLinks: skippedLinks);
+  }
+
+  /// Écrit une entrée [name] : jamais d'écrasement sans décision, écriture
+  /// atomique (pas de fichier tronqué si l'extraction est interrompue).
+  static Future<ExtractResult> _writeEntry(
+    SafeExtractionRoot root,
+    String name,
+    List<int> content,
+    ConflictResolver? onConflict,
+  ) async {
+    var path = await _guardAsync(() => root.prepareFile(name));
+    var keptBoth = 0;
+    final existing = FileSystemEntity.typeSync(path, followLinks: false);
+    if (existing != FileSystemEntityType.notFound) {
+      // Un dossier occupe la place : on ne le remplace jamais par un fichier.
+      final action = existing == FileSystemEntityType.directory
+          ? ConflictAction.keepBoth
+          : await (onConflict?.call(name, path) ??
+              Future.value(ConflictAction.keepBoth));
+      switch (action) {
+        case ConflictAction.skip:
+          return const ExtractResult(skippedExisting: 1);
+        case ConflictAction.keepBoth:
+          path = FileOperationsService.uniqueDestination(
+              p.dirname(path), p.basename(path));
+          keptBoth = 1;
+        case ConflictAction.replace:
+          break; // écriture atomique par-dessus l'existant
+      }
+    }
+    await AtomicWrite.bytes(path, content);
+    return ExtractResult(filesWritten: 1, keptBoth: keptBoth);
   }
 
   static Future<ExtractResult> _writeSingle({
     required String path,
     required List<int> decoded,
     required String destDir,
+    ConflictResolver? onConflict,
   }) async {
     // Nom dérivé du fichier local (pas de l'archive), vérifié quand même :
     // un lien symbolique existant à cet emplacement serait suivi.
     final root = await SafeExtractionRoot.open(destDir);
-    final out = await _guardAsync(
-        () => root.prepareFile(p.basenameWithoutExtension(path)));
-    await File(out).writeAsBytes(decoded);
-    return const ExtractResult(filesWritten: 1);
+    return _writeEntry(
+        root, p.basenameWithoutExtension(path), decoded, onConflict);
   }
 
   // Pour 7z/RAR, l'extraction est faite par l'outil externe : on liste
@@ -369,7 +412,9 @@ class ArchiveService {
     final entries = await _list7z(path, password: password);
     _validateNames(dest, entries.map((e) => e.fullPath));
     await Directory(dest).create(recursive: true);
-    final args = ['x', '-y', '-o$dest', if (password != null) '-p$password', '--', path];
+    // -aou : renomme automatiquement les fichiers déjà présents (au lieu de
+    // les écraser avec -y seul).
+    final args = ['x', '-y', '-aou', '-o$dest', if (password != null) '-p$password', '--', path];
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
     return ExtractResult(
@@ -386,7 +431,8 @@ class ArchiveService {
     final entries = await _listRar(path, password: password);
     _validateNames(dest, entries.map((e) => e.fullPath));
     await Directory(dest).create(recursive: true);
-    final args = ['x', '-y', if (password != null) '-p$password', path, '$dest/'];
+    // -or : renomme automatiquement les fichiers déjà présents.
+    final args = ['x', '-y', '-or', if (password != null) '-p$password', path, '$dest/'];
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur unrar : ${r.stderr}');
     return ExtractResult(
@@ -401,6 +447,7 @@ class ArchiveService {
     String entryPath,
     String destDir, {
     String? password,
+    ConflictResolver? onConflict,
   }) async {
     final type = detectType(archivePath);
     switch (type) {
@@ -413,7 +460,8 @@ class ArchiveService {
         break;
       default:
         // Formats mono-fichier et 7z/RAR : extraction complète.
-        return extractAll(archivePath, destDir, password: password);
+        return extractAll(archivePath, destDir,
+            password: password, onConflict: onConflict);
     }
 
     final bytes = await File(archivePath).readAsBytes();
@@ -426,7 +474,7 @@ class ArchiveService {
           : f.name;
       return norm == entryPath || norm.startsWith('$entryPath/');
     }).toList();
-    return _writeArchive(selected, destDir, null);
+    return _writeArchive(selected, destDir, null, onConflict: onConflict);
   }
 
   // ── Création d'archive ────────────────────────────────────────────────────
@@ -437,6 +485,7 @@ class ArchiveService {
     String? password,
     void Function(double)? onProgress,
   }) async {
+    _ensureNewArchive(destPath);
     if (password != null) {
       final cmd = await find7z();
       if (cmd == null) {
@@ -444,9 +493,10 @@ class ArchiveService {
           'p7zip requis pour chiffrer les archives ZIP.',
         );
       }
-      final args = ['a', '-tzip', '-p$password', '-mem=AES256', destPath, ...sourcePaths];
-      final r = await Process.run(cmd, args);
-      if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
+      await _produceThenRename(
+          destPath,
+          (tmp) => _run7z(cmd,
+              ['a', '-tzip', '-p$password', '-mem=AES256', tmp, ...sourcePaths]));
       return;
     }
     final archive = arc.Archive();
@@ -457,8 +507,7 @@ class ArchiveService {
       done++;
       onProgress?.call(done / total);
     }
-    final encoded = arc.ZipEncoder().encode(archive);
-    if (encoded != null) await File(destPath).writeAsBytes(encoded);
+    await AtomicWrite.bytes(destPath, _encodeZip(archive));
   }
 
   static Future<void> createTarGz(
@@ -466,6 +515,7 @@ class ArchiveService {
     List<String> sourcePaths, {
     void Function(double)? onProgress,
   }) async {
+    _ensureNewArchive(destPath);
     final archive = arc.Archive();
     final total = sourcePaths.length;
     var done = 0;
@@ -476,7 +526,10 @@ class ArchiveService {
     }
     final tarBytes = arc.TarEncoder().encode(archive);
     final gzBytes = arc.GZipEncoder().encode(Uint8List.fromList(tarBytes));
-    await File(destPath).writeAsBytes(gzBytes!);
+    if (gzBytes == null) {
+      throw const ArchiveOpException('Échec de la compression.');
+    }
+    await AtomicWrite.bytes(destPath, gzBytes);
   }
 
   static Future<void> create7z(
@@ -484,16 +537,72 @@ class ArchiveService {
     List<String> sourcePaths, {
     String? password,
   }) async {
+    _ensureNewArchive(destPath);
     final cmd = await find7z();
     if (cmd == null) throw const ArchiveOpException('p7zip non installé.');
-    final args = [
-      'a',
-      if (password != null) '-p$password',
-      destPath,
-      ...sourcePaths,
-    ];
+    // « 7z a » sur une archive existante y AJOUTERAIT les fichiers : on crée
+    // toujours une archive neuve sous un nom temporaire.
+    await _produceThenRename(
+        destPath,
+        (tmp) => _run7z(cmd, [
+              'a',
+              if (password != null) '-p$password',
+              tmp,
+              ...sourcePaths,
+            ]));
+  }
+
+  /// Refuse d'écraser (ou de compléter) une archive existante.
+  static void _ensureNewArchive(String destPath) {
+    if (FileSystemEntity.typeSync(destPath, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw ArchiveOpException(
+          '« ${p.basename(destPath)} » existe déjà : choisissez un autre nom.');
+    }
+  }
+
+  /// Chemin temporaire caché, libre, à côté de [target] ; l'extension est
+  /// conservée (7z en déduit le format).
+  static String _tempSibling(String target) {
+    final ext = p.extension(target);
+    final base = p.basenameWithoutExtension(target);
+    final stamp = DateTime.now().microsecondsSinceEpoch;
+    for (var i = 0;; i++) {
+      final tmp = p.join(p.dirname(target), '.$base.tmp-$stamp-$i$ext');
+      if (FileSystemEntity.typeSync(tmp, followLinks: false) ==
+          FileSystemEntityType.notFound) {
+        return tmp;
+      }
+    }
+  }
+
+  /// Fait produire le fichier par [produce] sous un nom temporaire, puis le
+  /// met en place par renommage : [target] n'est jamais laissé incomplet, et
+  /// est remplacé d'un coup s'il existait (l'original reste intact jusque-là).
+  static Future<void> _produceThenRename(
+    String target,
+    Future<void> Function(String tmp) produce,
+  ) async {
+    final tmp = _tempSibling(target);
+    try {
+      await produce(tmp);
+      await File(tmp).rename(AtomicWrite.resolveTarget(target));
+    } finally {
+      if (File(tmp).existsSync()) await File(tmp).delete();
+    }
+  }
+
+  static Future<void> _run7z(String cmd, List<String> args) async {
     final r = await Process.run(cmd, args);
     if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
+  }
+
+  static List<int> _encodeZip(arc.Archive archive) {
+    final encoded = arc.ZipEncoder().encode(archive);
+    if (encoded == null) {
+      throw const ArchiveOpException('Échec de la compression.');
+    }
+    return encoded;
   }
 
   // ── Modification ZIP ──────────────────────────────────────────────────────
@@ -507,8 +616,7 @@ class ArchiveService {
     for (final path in filePaths) {
       await _addToArchive(archive, path, p.basename(path));
     }
-    final encoded = arc.ZipEncoder().encode(archive);
-    if (encoded != null) await File(archivePath).writeAsBytes(encoded);
+    await AtomicWrite.bytes(archivePath, _encodeZip(archive));
   }
 
   static Future<void> removeFromZip(
@@ -526,8 +634,7 @@ class ArchiveService {
         newArchive.addFile(file);
       }
     }
-    final encoded = arc.ZipEncoder().encode(newArchive);
-    if (encoded != null) await File(archivePath).writeAsBytes(encoded);
+    await AtomicWrite.bytes(archivePath, _encodeZip(newArchive));
   }
 
   // ── Gestion du mot de passe (ZIP seulement) ───────────────────────────────
@@ -540,10 +647,9 @@ class ArchiveService {
     try {
       await extractAll(archivePath, tempDir.path);
       final sources = await tempDir.list().map((e) => e.path).toList();
-      final tmpOut = '$archivePath.tmp';
-      await createZip(tmpOut, sources, password: newPassword);
-      await File(archivePath).delete();
-      await File(tmpOut).rename(archivePath);
+      // L'original reste intact jusqu'au renommage final (atomique).
+      await _produceThenRename(archivePath,
+          (tmp) => createZip(tmp, sources, password: newPassword));
     } finally {
       await tempDir.delete(recursive: true);
     }
@@ -557,10 +663,8 @@ class ArchiveService {
     try {
       await extractAll(archivePath, tempDir.path, password: currentPassword);
       final sources = await tempDir.list().map((e) => e.path).toList();
-      final tmpOut = '$archivePath.tmp';
-      await createZip(tmpOut, sources);
-      await File(archivePath).delete();
-      await File(tmpOut).rename(archivePath);
+      await _produceThenRename(
+          archivePath, (tmp) => createZip(tmp, sources));
     } finally {
       await tempDir.delete(recursive: true);
     }

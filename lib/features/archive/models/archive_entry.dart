@@ -150,5 +150,34 @@ class ExtractResult {
   /// dossier de destination, elles ne sont donc jamais recréées.
   final int skippedLinks;
 
-  const ExtractResult({this.filesWritten = 0, this.skippedLinks = 0});
+  /// Fichiers non extraits car déjà présents (choix « ignorer »).
+  final int skippedExisting;
+
+  /// Fichiers extraits sous un autre nom car le nom était pris.
+  final int keptBoth;
+
+  const ExtractResult({
+    this.filesWritten = 0,
+    this.skippedLinks = 0,
+    this.skippedExisting = 0,
+    this.keptBoth = 0,
+  });
+
+  ExtractResult operator +(ExtractResult o) => ExtractResult(
+        filesWritten: filesWritten + o.filesWritten,
+        skippedLinks: skippedLinks + o.skippedLinks,
+        skippedExisting: skippedExisting + o.skippedExisting,
+        keptBoth: keptBoth + o.keptBoth,
+      );
+
+  /// Précisions à ajouter au message de succès, ou chaîne vide.
+  String get notes {
+    final parts = [
+      if (keptBoth > 0) '$keptBoth renommé(s) car déjà présent(s)',
+      if (skippedExisting > 0) '$skippedExisting déjà présent(s) ignoré(s)',
+      if (skippedLinks > 0)
+        '$skippedLinks lien(s) symbolique(s) ignoré(s) par sécurité',
+    ];
+    return parts.isEmpty ? '' : ' (${parts.join(', ')})';
+  }
 }
