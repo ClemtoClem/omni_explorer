@@ -20,10 +20,82 @@ class ArchiveService {
 
   // ── Détection du format ───────────────────────────────────────────────────
 
+  /// Format de [path], d'après sa signature binaire (les 512 premiers
+  /// octets), l'extension ne servant qu'en complément : un `.docx`, `.apk`
+  /// ou `.epub` est reconnu comme ZIP, un fichier mal nommé aussi.
   static ArchiveType detectType(String path) {
+    final byName = detectTypeByName(path);
+    final List<int> head;
+    try {
+      final raf = File(path).openSync();
+      try {
+        head = raf.readSync(512);
+      } finally {
+        raf.closeSync();
+      }
+    } on FileSystemException {
+      return byName; // fichier absent ou illisible : l'extension seule
+    }
+    return detectTypeFromHeader(head, byName);
+  }
+
+  /// Format d'après l'en-tête [head], [byName] départageant les cas que la
+  /// signature ne tranche pas (TAR compressé ou fichier compressé seul).
+  static ArchiveType detectTypeFromHeader(List<int> head, ArchiveType byName) {
+    bool starts(List<int> sig, [int at = 0]) {
+      if (head.length < at + sig.length) return false;
+      for (var i = 0; i < sig.length; i++) {
+        if (head[at + i] != sig[i]) return false;
+      }
+      return true;
+    }
+
+    ArchiveType compressed(ArchiveType single, ArchiveType tarred) =>
+        byName == tarred ? tarred : single;
+
+    if (starts([0x50, 0x4B, 0x03, 0x04]) || starts([0x50, 0x4B, 0x05, 0x06])) {
+      return byName == ArchiveType.jar ? ArchiveType.jar : ArchiveType.zip;
+    }
+    if (starts([0x1F, 0x8B])) return compressed(ArchiveType.gz, ArchiveType.tarGz);
+    if (starts([0x42, 0x5A, 0x68])) {
+      return compressed(ArchiveType.bz2, ArchiveType.tarBz2);
+    }
+    if (starts([0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00])) {
+      return compressed(ArchiveType.xz, ArchiveType.tarXz);
+    }
+    if (starts([0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])) return ArchiveType.sevenZip;
+    if (starts([0x52, 0x61, 0x72, 0x21, 0x1A, 0x07])) return ArchiveType.rar;
+    if (starts('ustar'.codeUnits, 257) || _isTarHeader(head)) {
+      return ArchiveType.tar;
+    }
+    return byName;
+  }
+
+  /// En-tête TAR valide, y compris l'ancien format V7 sans marque « ustar »
+  /// (celui qu'écrit le paquet `archive`) : la somme de contrôle (octets
+  /// 148-155, en octal) égale la somme des 512 octets, ce champ compté comme
+  /// des espaces.
+  static bool _isTarHeader(List<int> head) {
+    if (head.length < 512 || head[0] == 0) return false;
+    final field = String.fromCharCodes(head.sublist(148, 156))
+        .replaceAll('\u0000', ' ')
+        .trim();
+    final expected = int.tryParse(field, radix: 8);
+    if (expected == null) return false;
+    var sum = 0;
+    for (var i = 0; i < 512; i++) {
+      sum += (i >= 148 && i < 156) ? 0x20 : head[i];
+    }
+    return sum == expected;
+  }
+
+  /// Format d'après l'extension seule (fichier à créer, ou illisible).
+  static ArchiveType detectTypeByName(String path) {
     final lo = path.toLowerCase();
     if (lo.endsWith('.tar.gz')  || lo.endsWith('.tgz'))  return ArchiveType.tarGz;
-    if (lo.endsWith('.tar.bz2') || lo.endsWith('.tbz2')) return ArchiveType.tarBz2;
+    if (lo.endsWith('.tar.bz2') || lo.endsWith('.tbz2') || lo.endsWith('.tbz')) {
+      return ArchiveType.tarBz2;
+    }
     if (lo.endsWith('.tar.xz')  || lo.endsWith('.txz'))  return ArchiveType.tarXz;
     final ext = p.extension(lo).replaceFirst('.', '');
     switch (ext) {

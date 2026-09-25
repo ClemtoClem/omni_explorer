@@ -40,11 +40,41 @@ extension ArchiveTypeExt on ArchiveType {
   bool get isDartNative =>
       this != ArchiveType.sevenZip && this != ArchiveType.rar;
 
-  /// Permet d'ajouter / supprimer des entrées sans recréer de zéro.
-  bool get supportsInPlaceEdit =>
-      this == ArchiveType.zip || this == ArchiveType.jar;
+  /// Modifiable dans l'application (ajouter, renommer, déplacer…) : le
+  /// format peut être réécrit fidèlement par le paquet `archive`.
+  bool get canEdit => switch (this) {
+        ArchiveType.zip ||
+        ArchiveType.jar ||
+        ArchiveType.tar ||
+        ArchiveType.tarGz ||
+        ArchiveType.tarBz2 =>
+          true,
+        _ => false,
+      };
 
-  /// Prend en charge un mot de passe.
+  /// Ancien nom de [canEdit], utilisé par l'écran jusqu'à son remplacement.
+  bool get supportsInPlaceEdit => canEdit;
+
+  /// Pourquoi l'archive est en lecture seule (`null` si [canEdit]).
+  String? get readOnlyReason => switch (this) {
+        _ when canEdit => null,
+        ArchiveType.tarXz || ArchiveType.xz =>
+          'XZ : l\'encodeur disponible n\'écrit que des données non '
+              'compressées ; l\'archive est donc en lecture seule.',
+        ArchiveType.gz || ArchiveType.bz2 =>
+          'Fichier compressé unique : rien à organiser à l\'intérieur.',
+        ArchiveType.sevenZip || ArchiveType.rar =>
+          '$label : lecture et extraction uniquement (outil externe, sous '
+              'Linux).',
+        _ => 'Format non reconnu.',
+      };
+
+  /// Un seul fichier compressé, sans arborescence.
+  bool get isSingleFile =>
+      this == ArchiveType.gz || this == ArchiveType.bz2 || this == ArchiveType.xz;
+
+  /// Prend en charge un mot de passe : ZIP (AES, natif sur toutes les
+  /// plateformes), 7z et RAR (outil externe, lecture).
   bool get supportsPassword =>
       this == ArchiveType.zip || this == ArchiveType.sevenZip ||
       this == ArchiveType.rar || this == ArchiveType.jar;
