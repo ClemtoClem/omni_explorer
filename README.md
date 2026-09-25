@@ -646,3 +646,92 @@ Branche : `p0/atomic-writes`
   `setState` pendant la construction de l'écran. En debug, cela produit une
   erreur rouge (« setState() called during build ») ; en release, l'écran
   est reconstruit inutilement.
+
+### P0.6 : ouverture des gros fichiers sans plantage ni blocage
+
+Branche : `p0/open-size-limits`
+
+**Problèmes**
+- L'éditeur lisait tout fichier texte en entier (`readAsString`), **sans
+  limite** : ouvrir un journal de 2 Go faisait planter l'application par
+  manque de mémoire.
+- Les fichiers de catégorie « binaire » (`.bin`, `.dat`…) partaient dans
+  l'éditeur texte, où la lecture échouait sur de l'UTF-8 invalide avec un
+  message technique. Les `.docx` et `.odt`, qui sont des archives ZIP,
+  étaient traités comme du « texte enrichi ».
+- L'analyse des symboles d'un projet (autocomplétion) lisait **tous** les
+  fichiers de code, quelle que soit leur taille ou leur nombre.
+- **Constat en cours de tâche, grâce à des mesures** : ce n'est pas tant la
+  taille qui fige l'affichage que la **longueur de ligne**. Mesures sur PC
+  (tests de widget ; un téléphone sera plusieurs fois plus lent) :
+
+  | Contenu | Champ texte | Éditeur de code |
+  |---|---|---|
+  | 2 Mio en lignes de 80 caractères | 0,7 s | 0,3 s |
+  | 8 Mio en lignes de 80 caractères | 1,1 s | 2,9 s |
+  | une seule ligne de 64 Kio | 0,5 s | — |
+  | une seule ligne de 256 Kio | 3,2 s | 3,9 s |
+  | une seule ligne de 2 Mio | > 3 min | 6 min 35 s |
+
+  Un JavaScript minifié ou un JSON d'une seule ligne figeait donc
+  l'application, même de taille modeste. Un premier plan basé uniquement
+  sur la taille laissait passer exactement ce cas.
+
+**Modifications**
+- Nouveau `lib/features/text_editor/services/editor_open_policy.dart` :
+  - `FileProbe` lit la taille et les 8 premiers Kio (un octet nul ou de
+    l'UTF-8 invalide signalent un contenu binaire ; un caractère coupé par la
+    lecture partielle n'est pas compté comme invalide). Pour un fichier texte
+    de 10 Mio au plus, il parcourt ensuite le fichier par blocs de 64 Kio à
+    la recherche d'une ligne de plus de 32 Kio, en s'arrêtant dès qu'il la
+    trouve. **Le fichier n'est jamais chargé en entier** ;
+  - `EditorOpenPolicy.decide` :
+    - binaire → hexadécimal, avec un message ;
+    - plus de 10 Mio, ou une ligne de plus de 32 Kio → dialogue « Fichier
+      volumineux » qui en explique la raison et propose l'aperçu hexadécimal
+      (lecture partielle, en lecture seule au-delà de 32 Mio) ou l'annulation ;
+    - code ou Markdown de plus de 2 Mio → texte brut, sans coloration
+      syntaxique, avec un message ;
+  - `EditorOpenPolicy.refuseSwitch` applique les mêmes limites au changement
+    de mode (par exemple, passer en « Code » un fichier de 3 Mio, ou en texte
+    un fichier à lignes géantes, est refusé avec une explication).
+- Éditeur :
+  - chaque ouverture passe par cette politique ;
+  - le changement de mode sonde le fichier sur le disque, et se rabat sur le
+    texte en mémoire si le fichier a été supprimé ailleurs (entre modes
+    texte uniquement) ;
+  - l'analyse des symboles ignore les fichiers de plus de 512 Kio et
+    s'arrête après 2 000 fichiers.
+- `EditorViewMode` est déplacé dans `models/editor_view_mode.dart` (et
+  réexporté par l'écran), pour que la politique soit testable sans l'écran de
+  2 100 lignes.
+
+**Validation**
+- 24 nouveaux tests :
+  - `test/features/text_editor/editor_open_policy_test.dart` (17 tests) :
+    détection du binaire (UTF-8 accentué, Latin-1, caractère coupé), sonde
+    d'un fichier creux de 3 Gio sans le lire, ligne longue à cheval sur deux
+    blocs de lecture, lignes juste sous la limite, décisions et refus ;
+  - `test/features/text_editor/unified_editor_open_test.dart` (7 tests de
+    widget sur l'éditeur réel) : binaire et `.docx` en hex, dialogue
+    au-delà de 10 Mio (Annuler, Hexadécimal), code de plus de 2 Mio en texte
+    brut avec passage en « Code » refusé, fichier minifié, hex → texte
+    refusé au-delà de 10 Mio.
+- Tests de mutation : sans la détection du binaire, des lignes longues, de la
+  limite de taille, ou du report de longueur de ligne d'un bloc à l'autre,
+  des tests échouent à chaque fois.
+- `flutter test` : 159 tests réussis (deux exécutions complètes).
+  `flutter analyze` : 0 erreur, 0 avertissement (12 remarques de style
+  préexistantes). `flutter build apk --debug` : réussi.
+
+**Limites et suite**
+- Les fichiers texte en **Latin-1** ou en **UTF-16** sont vus comme binaires
+  et s'ouvrent en hexadécimal (auparavant, ils ne s'ouvraient pas du tout).
+  La détection d'encodage est prévue avec l'éditeur de code (P1.2).
+- Un fichier à lignes géantes ne peut être vu qu'en hexadécimal. Une
+  visionneuse texte en lecture seule, qui découpe les lignes pour
+  l'affichage, serait plus utile (P2).
+- Les seuils (10 Mio, 2 Mio, 32 Kio) viennent de mesures sur PC ; ils
+  seront à ajuster après essai sur un téléphone.
+- Les messages (SnackBar) s'affichent l'un après l'autre : un refus peut
+  n'apparaître qu'après l'expiration du message précédent.
