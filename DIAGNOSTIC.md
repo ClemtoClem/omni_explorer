@@ -159,3 +159,20 @@ Chaque tâche se termine par : `flutter analyze` sans erreur, les tests de la t�
 4. **Linux et Windows** : faut-il continuer à les maintenir ? Cela fixe le périmètre de la CI et des alternatives au 7z/RAR.
 
 Dès que tu valides, je commence par la tâche P0.0 puis P0.1 à P0.7, dans l'ordre. Je peux aussi publier ce diagnostic sous forme de page partageable si tu veux le transmettre.
+
+# Décisions de projet (25/09/2026)
+
+| Sujet | Décision |
+|---|---|
+| Plateformes | **Linux et Android uniquement**. `windows/`, `macos/`, `ios/` et `web/` sont à retirer (tâche P2). |
+| Distribution | **F-Droid** (pas de Play Store) : dépendances libres, compilées depuis leurs sources, sans service réseau propriétaire. |
+| Cryptographie du coffre-fort | libsodium. `sodium_libs`, choisi à l'origine, est **déprécié** : son auteur renvoie au paquet `sodium`, même API, dont les « build hooks » compilent libsodium 1.0.22 **depuis ses sources**, fournies et signées (`minisig`), sur Android (NDK) comme sur Linux (`configure` et `make`). Aucun binaire précompilé, et `libsodium-dev` n'est pas nécessaire. Le même format de coffre sur les deux plateformes permet l'export et l'import de l'un vers l'autre. |
+| Stockage des clés | Keystore sur Android, Secret Service (`libsecret-1-dev` à la compilation) sur Linux, via `flutter_secure_storage` (déjà en place depuis P0.7). |
+
+## Conséquences pour F-Droid (à traiter en P2)
+
+- **Licence** : le dépôt n'a **aucun fichier de licence**, or F-Droid n'accepte que des licences libres. `ffmpeg_kit_flutter_new` (variante full-gpl, bibliothèques x264, x265, xvidcore et vid.stab) rend l'application **GPL v3** : la licence à choisir doit donc être la GPL-3.0-or-later. Ce choix revient au titulaire des droits.
+- **Binaires précompilés** :
+  - `ffmpeg_kit_flutter_new` récupère une AAR précompilée sur Maven Central (`com.antonkarpenko:ffmpeg-kit-full-gpl`) ; F-Droid exige de recompiler FFmpeg-kit depuis ses sources ;
+  - `fvp` (licence BSD-3) s'appuie sur libmdk (`mdk-sdk`), fournie en binaires ; **la licence de libmdk reste à vérifier**. Sur Android, la lecture vidéo passe par le lecteur natif de `video_player`, et `fvp` ne sert que sur Linux : il faudra sans doute l'exclure du build Android.
+- **Réseau** : `google_fonts` télécharge les polices depuis les serveurs de Google pendant l'exécution (fonctionnalité réseau non libre et traçage, signalés par F-Droid). Il faut embarquer les polices dans l'application et désactiver ce téléchargement.
