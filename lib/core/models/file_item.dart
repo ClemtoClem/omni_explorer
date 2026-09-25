@@ -172,6 +172,13 @@ class TrashItem {
     required this.size,
   });
 
+  /// Élément présent dans la corbeille mais absent de son index (index
+  /// perdu ou corrompu) : son emplacement d'origine est inconnu.
+  bool get isOrphan => originalPath.isEmpty;
+
+  /// Nom affiché : le nom d'origine, ou le nom interne pour un orphelin.
+  String get name => p.basename(isOrphan ? trashedPath : originalPath);
+
   // ── Sérialisation ──────────────────────────────────────────────────────────
 
   Map<String, dynamic> toMap() => {

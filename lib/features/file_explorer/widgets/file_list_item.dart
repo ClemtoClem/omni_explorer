@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/models/file_item.dart';
+import '../../../core/services/file_operations_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
 import '../../../core/utils/file_utils.dart';
@@ -240,10 +241,7 @@ class _ContextMenuBtn extends StatelessWidget {
         break;
 
       case _ContextAction.trash:
-        ctx.read<TrashService>().moveToTrash(item.path);
-        ctx.read<FileExplorerProvider>().refresh();
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('« ${item.name} » déplacé vers la corbeille')));
+        _moveToTrash(ctx);
         break;
 
       case _ContextAction.copy:
@@ -262,6 +260,20 @@ class _ContextMenuBtn extends StatelessWidget {
         showFilePropertiesDialog(ctx, item);
         break;
     }
+  }
+
+  Future<void> _moveToTrash(BuildContext ctx) async {
+    final messenger = ScaffoldMessenger.of(ctx);
+    final explorer = ctx.read<FileExplorerProvider>();
+    try {
+      await ctx.read<TrashService>().moveToTrash(item.path);
+      messenger.showSnackBar(SnackBar(
+          content: Text('« ${item.name} » déplacé vers la corbeille')));
+    } on FileOpException catch (e) {
+      messenger.showSnackBar(SnackBar(
+          content: Text(e.message), backgroundColor: AppColors.error));
+    }
+    await explorer.refresh();
   }
 
   Future<void> _extractTo(BuildContext ctx, String dest) async {

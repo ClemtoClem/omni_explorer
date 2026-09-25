@@ -580,14 +580,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
 
   Future<void> _trashSelected(
       FileExplorerProvider prov, TrashService trash) async {
-    for (final path in prov.selected) {
-      await trash.moveToTrash(path);
-    }
+    final report = await trash.moveAllToTrash(prov.selected.toList());
     prov.clearSelection();
-    prov.refresh();
+    await prov.refresh();
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Éléments déplacés vers la corbeille')));
+      showFileOpReport(context, report, verb: 'mis à la corbeille');
     }
   }
 

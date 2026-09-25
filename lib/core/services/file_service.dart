@@ -378,7 +378,8 @@ class FileService {
         }
         return true;
       } else {
-        return await _trashService.moveToTrash(item.path) != null;
+        await _trashService.moveToTrash(item.path);
+        return true;
       }
     } catch (e) {
       debugPrint('[FileService] Erreur suppression: $e');
