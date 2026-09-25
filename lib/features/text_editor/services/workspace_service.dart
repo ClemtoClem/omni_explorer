@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
 
+import '../../../core/utils/atomic_write.dart';
+
 import '../models/workspace_settings.dart';
 
 /// Gère le fichier .workspace.json d'un projet.
@@ -29,7 +31,7 @@ class WorkspaceService {
   /// Sauvegarde les paramètres dans .workspace.json.
   static Future<void> save(
       String projectPath, WorkspaceSettings settings) async {
-    await _file(projectPath).writeAsString(settings.toJsonString());
+    await AtomicWrite.string(_file(projectPath).path, settings.toJsonString());
   }
 
   /// Vérifie si un fichier .workspace.json existe.

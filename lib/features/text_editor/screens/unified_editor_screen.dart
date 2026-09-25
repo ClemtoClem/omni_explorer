@@ -33,6 +33,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../app/theme/app_theme.dart';
 import '../../../core/services/settings_service.dart';
+import '../../../core/utils/atomic_write.dart';
 import '../../../core/utils/file_utils.dart';
 import '../../../core/utils/system_ui.dart';
 import '../../../core/widgets/custom_keyboard.dart';
@@ -667,10 +668,13 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     };
 
     try {
-      await File(tab.path).writeAsString(newContent);
+      // Écriture atomique : une interruption (application tuée, stockage
+      // plein) laisse l'ancien contenu intact au lieu d'un fichier tronqué.
+      await AtomicWrite.string(tab.path, newContent);
       tab.content = newContent;
       if (tab.viewMode == EditorViewMode.richText && tab.richCtrl != null) {
-        await File('${tab.path}.fmt').writeAsString(tab.richCtrl!.formattingJson);
+        await AtomicWrite.string(
+            '${tab.path}.fmt', tab.richCtrl!.formattingJson);
       }
       if (mounted) setState(() => tab.isDirty = false);
       _snack('Fichier sauvegardé');

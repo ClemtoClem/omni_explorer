@@ -7,69 +7,30 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:google_fonts/google_fonts.dart';
 import 'package:path/path.dart' as p;
-import 'package:provider/provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:omni_explorer/core/services/settings_service.dart';
 import 'package:omni_explorer/features/text_editor/screens/unified_editor_screen.dart';
+
+import '../../helpers/editor_harness.dart' as h;
 
 void main() {
   late Directory sandbox;
   late UnifiedEditorProvider editor;
 
   setUp(() async {
-    GoogleFonts.config.allowRuntimeFetching = false;
-    SharedPreferences.setMockInitialValues({});
+    h.setUpEditorTest();
     sandbox = await Directory.systemTemp.createTemp('editor_hex_test_');
     editor = UnifiedEditorProvider();
   });
 
   tearDown(() => sandbox.delete(recursive: true));
 
-  /// Laisse aboutir les entrées/sorties réelles déclenchées depuis la zone de
-  /// temps simulé du test : chaque étape (open, length, read…) a besoin d'un
-  /// tour de boucle réel puis d'un `pump` pour livrer son résultat.
-  Future<void> settleIo(WidgetTester tester) async {
-    for (var i = 0; i < 20; i++) {
-      await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)));
-      await tester.pump();
-    }
-  }
-
-  /// Ouvre [path] dans l'éditeur et attend la fin de la lecture disque.
   Future<void> openEditor(WidgetTester tester, String path,
-      {bool forceHex = false}) async {
-    final settings = SettingsService();
-    await tester.runAsync(() async {
-      await settings.init();
-      await tester.pumpWidget(MultiProvider(
-        providers: [
-          ChangeNotifierProvider.value(value: settings),
-          ChangeNotifierProvider.value(value: editor),
-        ],
-        child: MaterialApp(
-          home: UnifiedEditorScreen(filePaths: [path], forceHex: forceHex),
-        ),
-      ));
-    });
-    await settleIo(tester);
-  }
-
-  /// Choisit [label] dans le menu « Mode d'interprétation ».
-  Future<void> switchMode(WidgetTester tester, String label) async {
-    await tester.tap(find.byIcon(Icons.swap_horiz_rounded));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text(label).last);
-    await tester.pumpAndSettle();
-    await settleIo(tester);
-  }
-
-  // L'onglet est une classe privée de l'écran : accès dynamique pour les
-  // vérifications internes.
-  dynamic activeTab() => (editor as dynamic).activeTab;
+          {bool forceHex = false}) =>
+      h.openEditor(tester, editor, path, forceHex: forceHex);
+  Future<void> switchMode(WidgetTester tester, String label) =>
+      h.switchMode(tester, label);
+  dynamic activeTab() => h.activeTab(editor);
 
   testWidgets('hex → texte affiche le vrai contenu, pas un document vide',
       (tester) async {

@@ -9,6 +9,8 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import '../../../core/utils/atomic_write.dart';
+
 /// Contenu chargé pour l'éditeur hexadécimal.
 class HexLoadResult {
   /// Octets chargés (au plus [HexFileIO.maxLoadedBytes]).
@@ -79,6 +81,6 @@ class HexFileIO {
           'Sauvegarde refusée : le fichier a été modifié sur le disque depuis '
           'son ouverture. Rouvrez-le avant de le modifier.');
     }
-    await File(path).writeAsBytes(bytes, flush: true);
+    await AtomicWrite.bytes(path, bytes);
   }
 }
