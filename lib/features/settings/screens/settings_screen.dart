@@ -276,13 +276,21 @@ class SettingsScreen extends StatelessWidget {
               child: const Text('Annuler'),
             ),
             FilledButton(
-              onPressed: () {
+              onPressed: () async {
                 s.setSshHost(hostCtrl.text.trim());
                 s.setSshPort(int.tryParse(portCtrl.text.trim()) ?? 2222);
                 s.setSshUsername(userCtrl.text.trim());
-                s.setSshPassword(passCtrl.text);
                 s.setSshSharedPath(sharedCtrl.text.trim());
+                final messenger = ScaffoldMessenger.of(ctx);
                 Navigator.pop(ctx);
+                try {
+                  await s.setSshPassword(passCtrl.text);
+                } catch (_) {
+                  messenger.showSnackBar(const SnackBar(
+                      content: Text('Mot de passe non mémorisé : stockage '
+                          'sécurisé indisponible. Il reste utilisable '
+                          'jusqu\'à la fermeture de l\'application.')));
+                }
               },
               child: const Text('Enregistrer'),
             ),

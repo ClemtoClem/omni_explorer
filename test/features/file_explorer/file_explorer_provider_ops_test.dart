@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -16,6 +17,8 @@ void main() {
 
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
+    // Pas de trousseau système en test : stockage sécurisé simulé.
+    FlutterSecureStorage.setMockInitialValues({});
     sandbox = await Directory.systemTemp.createTemp('explorer_ops_test_');
     a = p.join(sandbox.path, 'a');
     b = p.join(sandbox.path, 'b');

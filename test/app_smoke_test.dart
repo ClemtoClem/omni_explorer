@@ -2,6 +2,7 @@
 /// @brief Test de démarrage : l'application se construit avec ses vrais
 /// providers et affiche l'écran d'accueil (menu des fonctionnalités).
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
@@ -19,6 +20,8 @@ void main() {
     // Pas d'accès réseau pendant les tests : polices de repli.
     GoogleFonts.config.allowRuntimeFetching = false;
     SharedPreferences.setMockInitialValues({});
+    // Pas de trousseau système en test : stockage sécurisé simulé.
+    FlutterSecureStorage.setMockInitialValues({});
   });
 
   testWidgets('l\'application démarre sur le menu des fonctionnalités',

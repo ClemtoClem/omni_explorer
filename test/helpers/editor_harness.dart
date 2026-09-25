@@ -1,6 +1,7 @@
 /// Outils communs aux tests de widget de l'éditeur unifié, qui lit et écrit
 /// de vrais fichiers.
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -14,6 +15,8 @@ import 'package:omni_explorer/features/text_editor/screens/unified_editor_screen
 void setUpEditorTest() {
   GoogleFonts.config.allowRuntimeFetching = false;
   SharedPreferences.setMockInitialValues({});
+  // Pas de trousseau système en test : stockage sécurisé simulé.
+  FlutterSecureStorage.setMockInitialValues({});
 }
 
 /// Laisse aboutir les entrées/sorties réelles déclenchées depuis la zone de

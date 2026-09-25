@@ -25,6 +25,10 @@ dependencies:
   shared_preferences: ^2.2.3
   sqflite: ^2.3.3+1
   sqflite_common_ffi: ^2.3.4
+  # Secrets (mot de passe SSH, puis clé du coffre-fort) : Keystore sur Android,
+  # DPAPI sur Windows, Secret Service (libsecret) sur Linux — le build Linux
+  # exige le paquet système libsecret-1-dev (voir README).
+  flutter_secure_storage: ^10.3.4
 
   # ── Media Player ────────────────────────────────────────────────────────────
   just_audio: ^0.9.40

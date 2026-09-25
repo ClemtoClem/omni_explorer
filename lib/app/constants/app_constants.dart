@@ -45,6 +45,8 @@ class AppConstants {
   static const String prefSshHost         = 'ssh_host';
   static const String prefSshPort         = 'ssh_port';
   static const String prefSshUsername     = 'ssh_username';
+  /// Ancien emplacement, EN CLAIR, du mot de passe SSH : lu une seule fois
+  /// pour migration vers le stockage sécurisé, puis effacé.
   static const String prefSshPassword     = 'ssh_password';
   static const String prefSshSharedPath   = 'ssh_shared_path';
   /// Empreintes des clés d'hôte SSH acceptées (confiance à la 1re connexion).

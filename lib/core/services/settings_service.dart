@@ -6,6 +6,7 @@
 
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../../app/constants/app_constants.dart';
@@ -100,10 +101,66 @@ class SettingsService extends ChangeNotifier {
     _prefs.setString(AppConstants.prefSshUsername, v);
     notifyListeners();
   }
-  void setSshPassword(String v) {
+
+  /// Stockage des secrets : Keystore sur Android, DPAPI sur Windows, Secret
+  /// Service sur Linux. Remplaçable dans les tests.
+  @visibleForTesting
+  static FlutterSecureStorage secureStorage = const FlutterSecureStorage();
+
+  /// Délai maximal d'un accès au stockage sécurisé. Sans lui, un stockage
+  /// qui ne répond pas (Linux sans trousseau déverrouillé…) bloquerait le
+  /// démarrage de l'application, qui attend [init].
+  @visibleForTesting
+  static Duration secureStorageTimeout = const Duration(seconds: 5);
+
+  /// Clé du mot de passe SSH dans [secureStorage].
+  static const String sshPasswordSecretKey = 'ssh_password';
+
+  /// Mémorise le mot de passe SSH dans le stockage sécurisé — jamais dans
+  /// les préférences, qui sont en clair. Lève une exception si le stockage
+  /// sécurisé est indisponible : le mot de passe reste alors utilisable pour
+  /// la session, sans être mémorisé.
+  Future<void> setSshPassword(String v) async {
     _sshPassword = v;
-    _prefs.setString(AppConstants.prefSshPassword, v);
     notifyListeners();
+    if (v.isEmpty) {
+      await secureStorage
+          .delete(key: sshPasswordSecretKey)
+          .timeout(secureStorageTimeout);
+    } else {
+      await secureStorage
+          .write(key: sshPasswordSecretKey, value: v)
+          .timeout(secureStorageTimeout);
+    }
+  }
+
+  /// Lit le mot de passe SSH dans le stockage sécurisé, après y avoir migré
+  /// la valeur que les versions précédentes gardaient en clair dans les
+  /// préférences. La valeur en clair n'est effacée qu'une fois copiée.
+  Future<String> _loadSshPassword() async {
+    final legacy = _prefs.getString(AppConstants.prefSshPassword);
+    try {
+      if (legacy != null) {
+        if (legacy.isNotEmpty) {
+          await secureStorage
+              .write(key: sshPasswordSecretKey, value: legacy)
+              .timeout(secureStorageTimeout);
+        }
+        await _prefs.remove(AppConstants.prefSshPassword);
+      }
+      return await secureStorage
+              .read(key: sshPasswordSecretKey)
+              .timeout(secureStorageTimeout) ??
+          '';
+    } catch (e) {
+      // Stockage sécurisé indisponible ou muet (ex. Linux sans trousseau,
+      // délai dépassé) : l'ancienne
+      // valeur est conservée pour ne pas être perdue, et la migration sera
+      // retentée au prochain lancement. Le secret n'est jamais journalisé.
+      debugPrint('[Settings] stockage sécurisé indisponible '
+          '(${e.runtimeType}) : mot de passe SSH non migré');
+      return legacy ?? '';
+    }
   }
   void setSshSharedPath(String v) {
     _sshSharedPath = v;
@@ -117,12 +174,9 @@ class SettingsService extends ChangeNotifier {
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
 
-    _themeMode = ThemeMode.values[
-        _prefs.getInt(AppConstants.prefThemeMode) ?? ThemeMode.dark.index];
-    _viewMode  = ViewMode.values[
-        _prefs.getInt(AppConstants.prefViewMode) ?? 0];
-    _sortMode  = SortMode.values[
-        _prefs.getInt(AppConstants.prefSortBy) ?? 0];
+    _themeMode         = ThemeMode.values[_prefs.getInt(AppConstants.prefThemeMode) ?? ThemeMode.dark.index];
+    _viewMode          = ViewMode.values[_prefs.getInt(AppConstants.prefViewMode) ?? 0];
+    _sortMode          = SortMode.values[_prefs.getInt(AppConstants.prefSortBy) ?? 0];
     _sortAsc           = _prefs.getBool(AppConstants.prefSortAsc)           ?? true;
     _showHidden        = _prefs.getBool(AppConstants.prefShowHidden)        ?? false;
     _useCustomKeyboard = _prefs.getBool(AppConstants.prefUseCustomKeyboard) ?? true;
@@ -131,7 +185,7 @@ class SettingsService extends ChangeNotifier {
     _loadShortcuts();
     _loadRecentFiles();
     _loadFonts();
-    _loadSsh();
+    await _loadSsh();
 
     // Applique le preset chargé aux couleurs et la police à l'interface
     AppColors.apply(_themePreset);
@@ -234,11 +288,11 @@ class SettingsService extends ChangeNotifier {
     _hexFontSize        = _prefs.getInt(AppConstants.prefHexFontSize)            ?? 12;
   }
 
-  void _loadSsh() {
+  Future<void> _loadSsh() async {
     _sshHost       = _prefs.getString(AppConstants.prefSshHost)       ?? 'localhost';
     _sshPort       = _prefs.getInt(AppConstants.prefSshPort)          ?? 2222;
     _sshUsername   = _prefs.getString(AppConstants.prefSshUsername)   ?? 'user';
-    _sshPassword   = _prefs.getString(AppConstants.prefSshPassword)   ?? '';
+    _sshPassword   = await _loadSshPassword();
     _sshSharedPath = _prefs.getString(AppConstants.prefSshSharedPath) ?? '/mnt/shared';
   }
 
