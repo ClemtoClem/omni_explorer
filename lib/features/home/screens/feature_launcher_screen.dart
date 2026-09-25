@@ -286,8 +286,8 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
       FeatureCard(
         icon: Icons.movie_filter_rounded,
         color: AppColors.colorVideo,
-        title: 'Éditeur vidéo',
-        subtitle: 'Trim, crop, assemblage, reverse, export',
+        title: 'Éditeur multimédia',
+        subtitle: 'Vidéo, audio, image · filmer & enregistrer',
         onTap: () => _open(AppFeature.videoEditor),
       ),
       FeatureCard(

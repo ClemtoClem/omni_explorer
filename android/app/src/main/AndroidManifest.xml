@@ -5,9 +5,11 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- camera_android_camerax déclare maxSdkVersion=28 ; on impose 29. -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="29" />
+        android:maxSdkVersion="29"
+        tools:replace="android:maxSdkVersion" />
 
     <!-- ── Bluetooth usage ────────────────────────────────────────────────── -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
@@ -40,6 +42,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- ── Export vidéo en arrière-plan (flutter_foreground_task) ───────────── -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- ── Captation (caméra + micro) pour l'éditeur multimédia ─────────────── -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <!-- ── Notifications de lecture (Android 13+) ──────────────────────────── -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -102,6 +113,13 @@
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </receiver>
+
+        <!-- ── Service d'export vidéo en arrière-plan (flutter_foreground_task)
+             Ne pas renommer (nom de classe imposé par le plugin). -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

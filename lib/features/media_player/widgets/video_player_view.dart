@@ -1,17 +1,9 @@
-/// @file video_player_view.dart
-/// @brief Lecteur vidéo personnalisé bâti sur media_kit, avec tous les gestes
-/// (double-tap zones, swipe luminosité/volume, pinch zoom, long press ×2,
-/// scrub timeline + preview), les contrôles, les sous-titres déplaçables,
-/// les marqueurs utilisateur, le changement de piste, la reprise persistante,
-/// la pause automatique au débranchement du casque, etc.
-
 import 'dart:async';
 import 'dart:io';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 import 'package:provider/provider.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:uuid/uuid.dart';
@@ -19,15 +11,12 @@ import 'package:volume_controller/volume_controller.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../../app/theme/app_theme.dart';
-import '../models/subtitle_settings.dart';
 import '../models/video_marker.dart';
 import '../providers/media_player_provider.dart';
 import '../services/subtitle_parser.dart';
-import '../services/track_preferences_service.dart';
 import 'marker_editor_dialog.dart';
 import 'subtitle_search_dialog.dart';
 import 'subtitle_settings_sheet.dart';
-import 'track_picker_sheet.dart';
 import 'vertical_value_slider.dart';
 import 'video_indicator_overlay.dart';
 import 'video_seek_bar.dart';
@@ -42,11 +31,10 @@ class VideoPlayerView extends StatefulWidget {
 }
 
 class _VideoPlayerViewState extends State<VideoPlayerView>
-    with TickerProviderStateMixin, WidgetsBindingObserver {
+    with WidgetsBindingObserver {
   late MediaPlayerProvider _provider;
 
-  late final Player _player = Player();
-  late final VideoController _videoController = VideoController(_player);
+  VideoPlayerController? _controller;
   final _uuid = const Uuid();
 
   // ── État de lecture ───────────────────────────────────────────────────────
@@ -55,9 +43,11 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   bool _playing = false;
   bool _buffering = true;
   bool _completed = false;
-  Tracks _tracks = const Tracks();
-  AudioTrack _audioTrack = AudioTrack.auto();
-  SubtitleTrack _subtitleTrack = SubtitleTrack.auto();
+  bool _completionHandled = false;
+  double _currentSpeed = 1.0;
+
+  // ── Sous-titres ───────────────────────────────────────────────────────────
+  List<SubtitleEntry> _subEntries = const [];
   List<String> _subtitleLines = const [];
 
   // ── État UI ───────────────────────────────────────────────────────────────
@@ -67,13 +57,7 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   Timer? _hideTimer;
   Timer? _savePositionTimer;
 
-  // ── Index courant suivi pour détecter un changement de média ──────────────
   int _lastIndex = -1;
-  String? _signature;
-
-  // ── Subtitle entries pour la recherche (chargées à la demande) ────────────
-  List<SubtitleEntry> _subEntries = const [];
-  bool _subsLoaded = false;
 
   // ── Indicateurs HUD éphémères ─────────────────────────────────────────────
   _Hud? _hud;
@@ -88,19 +72,13 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   double _dragStartBrightness = 0.5;
   double _dragStartVolume = 0.5;
   Duration _dragStartPosition = Duration.zero;
-  /// Position globale au début du glissement vertical (référence pour le delta).
   Offset _vDragOrigin = Offset.zero;
-  /// Côté où le drag vertical a commencé (gauche = luminosité, droite = volume).
   bool _vDragOnLeft = true;
-  // Vitesse précédente pour restaurer après long-press ×2.
   double _normalRate = 1.0;
   bool _holdSpeedActive = false;
 
   // ── Casque ─────────────────────────────────────────────────────────────────
   StreamSubscription? _becomingNoisySub;
-
-  // ── Abonnements aux streams du player ─────────────────────────────────────
-  final List<StreamSubscription> _subs = [];
 
   @override
   void initState() {
@@ -111,14 +89,11 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     WakelockPlus.enable();
     VolumeController.instance.showSystemUI = false;
     _setupHeadphoneWatcher();
-    _wireStreams();
     _openCurrent();
     _savePositionTimer = Timer.periodic(
         const Duration(seconds: 5), (_) => _persistResume());
   }
 
-  /// L'app passe en arrière-plan : on persiste immédiatement la position
-  /// (sinon on perd jusqu'à 5 s de progression si le système tue le process).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
@@ -136,79 +111,77 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     _vSliderTimer?.cancel();
     _savePositionTimer?.cancel();
     _becomingNoisySub?.cancel();
-    for (final s in _subs) {
-      s.cancel();
-    }
     _persistResume();
     WakelockPlus.disable();
-    // Pas de reset : on utilise la luminosité SYSTÈME (modifiée durablement
-    // côté OS comme avec les touches matérielles).
-    _player.dispose();
+    _controller?.removeListener(_onControllerUpdate);
+    _controller?.dispose();
+    _zoom.dispose();
     super.dispose();
   }
 
-  // ── Provider listener (changement d'index, paramètres sous-titres) ────────
+  // ── Provider listener ─────────────────────────────────────────────────────
 
   void _onProviderChanged() {
     if (!mounted) return;
     if (_provider.currentIndex != _lastIndex) {
       _openCurrent();
     } else {
+      if (!_holdSpeedActive) {
+        final speed = _provider.playbackSpeed;
+        if (speed != _currentSpeed) {
+          _currentSpeed = speed;
+          _controller?.setPlaybackSpeed(speed);
+        }
+      }
       setState(() {});
     }
   }
 
-  // ── Streams ───────────────────────────────────────────────────────────────
+  // ── Listener VideoPlayerController ────────────────────────────────────────
 
-  void _wireStreams() {
-    final s = _player.stream;
-    _subs.add(s.position.listen((p) {
-      if (!_scrubbing && mounted) setState(() => _position = p);
-    }));
-    _subs.add(s.duration.listen((d) {
-      if (mounted) setState(() => _duration = d);
-    }));
-    _subs.add(s.playing.listen((p) {
-      if (mounted) {
-        setState(() => _playing = p);
-        if (p) {
-          _scheduleHideControls();
-        } else {
-          _hideTimer?.cancel();
-          setState(() => _controlsVisible = true);
-        }
-      }
-    }));
-    _subs.add(s.buffering.listen((b) {
-      if (mounted) setState(() => _buffering = b);
-    }));
-    _subs.add(s.completed.listen((c) {
-      if (mounted) {
-        setState(() => _completed = c);
-        if (c) _onCompleted();
-      }
-    }));
-    _subs.add(s.tracks.listen((t) {
-      if (mounted) {
-        setState(() => _tracks = t);
-        _applyTrackPreferences();
-      }
-    }));
-    _subs.add(s.subtitle.listen((lines) {
-      if (mounted) setState(() => _subtitleLines = lines.where((l) => l.isNotEmpty).toList());
-    }));
-    _subs.add(s.track.listen((t) {
-      if (mounted) {
-        setState(() {
-          _audioTrack = t.audio;
-          _subtitleTrack = t.subtitle;
-        });
-        _saveTrackPreferences();
-      }
-    }));
-    _subs.add(s.rate.listen((r) {
-      if (mounted && !_holdSpeedActive) _normalRate = r;
-    }));
+  void _onControllerUpdate() {
+    if (!mounted || _controller == null) return;
+    final v = _controller!.value;
+
+    final pos = v.position;
+    final dur = v.duration;
+    final playing = v.isPlaying;
+    final buffering = v.isBuffering;
+    final lines = _currentSubtitleLines(pos);
+
+    bool fireCompleted = false;
+    if (!_completionHandled &&
+        dur > Duration.zero &&
+        pos >= dur &&
+        !playing) {
+      _completionHandled = true;
+      fireCompleted = true;
+    }
+
+    setState(() {
+      if (!_scrubbing) _position = pos;
+      _duration = dur;
+      _playing = playing;
+      _buffering = buffering;
+      _subtitleLines = lines;
+      if (fireCompleted) _completed = true;
+    });
+
+    if (fireCompleted) _onCompleted();
+
+    if (playing) {
+      _scheduleHideControls();
+    } else if (!_scrubbing) {
+      _hideTimer?.cancel();
+      if (!_controlsVisible && mounted) setState(() => _controlsVisible = true);
+    }
+  }
+
+  List<String> _currentSubtitleLines(Duration pos) {
+    for (final e in _subEntries) {
+      if (pos >= e.start && pos <= e.end) return [e.text];
+    }
+    return const [];
   }
 
   // ── Casque déconnecté → pause auto ────────────────────────────────────────
@@ -217,7 +190,7 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     try {
       final session = await AudioSession.instance;
       _becomingNoisySub = session.becomingNoisyEventStream.listen((_) {
-        if (_playing) _player.pause();
+        if (_playing) _controller?.pause();
       });
     } catch (_) {}
   }
@@ -228,70 +201,62 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     final path = _provider.currentPath;
     if (path == null) return;
     _lastIndex = _provider.currentIndex;
-    _subsLoaded = false;
-    _subEntries = const [];
+
+    // Libère l'ancien contrôleur
+    _controller?.removeListener(_onControllerUpdate);
+    final old = _controller;
+    _controller = null;
+
+    if (mounted) {
+      setState(() {
+        _position = Duration.zero;
+        _duration = Duration.zero;
+        _playing = false;
+        _buffering = true;
+        _completed = false;
+        _completionHandled = false;
+        _subtitleLines = const [];
+        _subEntries = const [];
+      });
+    }
+
+    await old?.dispose();
+
+    // Charge les sous-titres externes (.srt / .vtt)
+    final subPath = SubtitleParser.findExternalSubtitleFor(path);
+    if (subPath != null) {
+      try {
+        final entries = await SubtitleParser.parseFile(subPath);
+        if (mounted) setState(() => _subEntries = entries);
+      } catch (_) {}
+    }
 
     final resume = await _provider.resumePositionFor(path);
-    await _player.open(Media('file://$path'), play: false);
-    if (resume != null && resume > Duration.zero) {
-      await _player.seek(resume);
-    }
-    await _player.setRate(_provider.playbackSpeed);
-    await _player.play();
-  }
 
-  // ── Préférences de pistes ─────────────────────────────────────────────────
+    final ctrl = VideoPlayerController.file(File(path));
+    if (!mounted) { ctrl.dispose(); return; }
+    _controller = ctrl;
 
-  String _trackSignature(Tracks tracks) {
-    String key(AudioTrack t) => '${t.language ?? ""}|${t.title ?? ""}';
-    String keyS(SubtitleTrack t) => '${t.language ?? ""}|${t.title ?? ""}';
-    return TrackPreferencesService.buildSignature(
-      audioKeys: tracks.audio.map(key),
-      subtitleKeys: tracks.subtitle.map(keyS),
-    );
-  }
-
-  Future<void> _applyTrackPreferences() async {
-    if (_tracks.audio.length <= 2 && _tracks.subtitle.length <= 2) {
-      // Les deux entrées par défaut (auto + no) ne sont pas significatives.
+    try {
+      await ctrl.initialize();
+    } catch (e) {
+      debugPrint('[VideoPlayer] init: $e');
+      if (mounted) setState(() => _buffering = false);
       return;
     }
-    final sig = _trackSignature(_tracks);
-    if (sig == _signature) return;
-    _signature = sig;
-    final pref = await _provider.getTrackPreference(sig);
-    if (pref == null) {
-      _provider.updateSubtitleSettings(const SubtitleSettings());
-      return;
-    }
-    final audio = _tracks.audio.firstWhere(
-      (t) => t.id == pref.audioTrackId ||
-          (t.language != null && t.language == pref.audioTrackLanguage),
-      orElse: () => _audioTrack,
-    );
-    final sub = _tracks.subtitle.firstWhere(
-      (t) => t.id == pref.subtitleTrackId ||
-          (t.language != null && t.language == pref.subtitleTrackLanguage),
-      orElse: () => _subtitleTrack,
-    );
-    await _player.setAudioTrack(audio);
-    await _player.setSubtitleTrack(sub);
-    _provider.updateSubtitleSettings(pref.subtitleSettings);
-  }
 
-  Future<void> _saveTrackPreferences() async {
-    final sig = _signature;
-    if (sig == null) return;
-    await _provider.saveTrackPreference(
-      sig,
-      TrackPreference(
-        audioTrackId: _audioTrack.id,
-        audioTrackLanguage: _audioTrack.language,
-        subtitleTrackId: _subtitleTrack.id,
-        subtitleTrackLanguage: _subtitleTrack.language,
-        subtitleSettings: _provider.subtitleSettings,
-      ),
-    );
+    if (!mounted) { ctrl.dispose(); return; }
+
+    ctrl.addListener(_onControllerUpdate);
+    await ctrl.setPlaybackSpeed(_currentSpeed);
+
+    final dur = ctrl.value.duration;
+    if (resume != null && resume > Duration.zero &&
+        resume < dur - const Duration(seconds: 5)) {
+      await ctrl.seekTo(resume);
+    }
+
+    await ctrl.play();
   }
 
   // ── Reprise persistante ───────────────────────────────────────────────────
@@ -305,8 +270,9 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
 
   void _onCompleted() {
     if (_provider.isRepeat) {
-      _player.seek(Duration.zero);
-      _player.play();
+      _controller?.seekTo(Duration.zero);
+      _controller?.play();
+      setState(() { _completed = false; _completionHandled = false; });
       return;
     }
     if (_provider.autoplay &&
@@ -341,14 +307,15 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     if (_controlsVisible) _scheduleHideControls();
   }
 
-  // ── Tap & seek helpers ────────────────────────────────────────────────────
+  // ── Seek helpers ──────────────────────────────────────────────────────────
 
   void _seekRelative(Duration delta) {
+    if (_controller == null) return;
     final target = _position + delta;
     final clamped = target < Duration.zero
         ? Duration.zero
         : (target > _duration ? _duration : target);
-    _player.seek(clamped);
+    _controller!.seekTo(clamped);
     _showHud(_Hud(
       icon: delta.isNegative
           ? Icons.fast_rewind_rounded
@@ -364,9 +331,9 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
       _seekRelative(const Duration(seconds: 10));
     } else {
       if (_playing) {
-        await _player.pause();
+        await _controller?.pause();
       } else {
-        await _player.play();
+        await _controller?.play();
       }
     }
   }
@@ -374,56 +341,45 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   // ── Long-press ×2 ─────────────────────────────────────────────────────────
 
   Future<void> _startHoldSpeed() async {
-    if (_holdSpeedActive) return;
+    if (_holdSpeedActive || _controller == null) return;
     _holdSpeedActive = true;
-    _normalRate = _provider.playbackSpeed;
-    await _player.setRate(2.0);
+    _normalRate = _currentSpeed;
+    await _controller!.setPlaybackSpeed(2.0);
     HapticFeedback.lightImpact();
     _showHud(const _Hud(icon: Icons.speed_rounded, label: '×2'));
   }
 
   Future<void> _endHoldSpeed() async {
-    if (!_holdSpeedActive) return;
+    if (!_holdSpeedActive || _controller == null) return;
     _holdSpeedActive = false;
-    await _player.setRate(_normalRate);
+    await _controller!.setPlaybackSpeed(_normalRate);
   }
 
-  // ── Drag verticaux : luminosité (gauche) / volume (droite) ────────────────
+  // ── Drag verticaux : luminosité / volume ──────────────────────────────────
 
   Future<void> _onVerticalDragStart(DragStartDetails d, Size size) async {
     _vDragOrigin = d.globalPosition;
     _vDragOnLeft = d.localPosition.dx < size.width / 2;
     if (_vDragOnLeft) {
-      try {
-        _dragStartBrightness = await ScreenBrightness.instance.system;
-      } catch (_) {}
+      try { _dragStartBrightness = await ScreenBrightness.instance.system; }
+      catch (_) {}
     } else {
-      try {
-        _dragStartVolume = await VolumeController.instance.getVolume();
-      } catch (_) {}
+      try { _dragStartVolume = await VolumeController.instance.getVolume(); }
+      catch (_) {}
     }
   }
 
-  Future<void> _onVerticalDragUpdate(
-      DragUpdateDetails d, Size size) async {
-    // Delta cumulé depuis le DÉBUT du drag, en fraction de la hauteur visible
-    // (donc indépendant de l'orientation : haut → +, bas → −).
+  Future<void> _onVerticalDragUpdate(DragUpdateDetails d, Size size) async {
     final delta = (_vDragOrigin.dy - d.globalPosition.dy) / size.height;
     if (_vDragOnLeft) {
       final v = (_dragStartBrightness + delta).clamp(0.0, 1.0);
-      try {
-        // Écrit dans Settings.System.SCREEN_BRIGHTNESS (luminosité système) :
-        // s'aligne sur le curseur des paramètres et reste après fermeture.
-        await ScreenBrightness.instance.setSystemScreenBrightness(v);
-      } catch (_) {}
+      try { await ScreenBrightness.instance.setSystemScreenBrightness(v); }
+      catch (_) {}
       _showVSlider(_VSlider(kind: _VSliderKind.brightness, value: v));
     } else {
       final v = (_dragStartVolume + delta).clamp(0.0, 1.0);
-      try {
-        // VolumeController contrôle AudioManager.STREAM_MUSIC (volume média
-        // système : touches matérielles et statut système restent en phase).
-        await VolumeController.instance.setVolume(v);
-      } catch (_) {}
+      try { await VolumeController.instance.setVolume(v); }
+      catch (_) {}
       _showVSlider(_VSlider(kind: _VSliderKind.volume, value: v));
     }
   }
@@ -444,74 +400,57 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   }
 
   void _onHorizontalDragUpdate(DragUpdateDetails d, Size size) {
-    final ratio = (d.globalPosition.dx - d.localPosition.dx + d.localPosition.dx) /
-        size.width; // (positionneur)
     final deltaSec =
         (d.primaryDelta ?? 0) / size.width * _duration.inSeconds * 0.8;
-    final target = _dragStartPosition + Duration(seconds: deltaSec.round());
+    final target =
+        _dragStartPosition + Duration(seconds: deltaSec.round());
     final clamped = target < Duration.zero
         ? Duration.zero
         : (target > _duration ? _duration : target);
     _dragStartPosition = clamped;
     setState(() => _scrubPreview = clamped);
-    _showHud(_Hud(
-      icon: Icons.swap_horiz_rounded,
-      label: _fmt(clamped),
-    ));
-    // (ratio est calculé mais non utilisé : la preview suit _dragStartPosition)
-    ratio.toString();
+    _showHud(_Hud(icon: Icons.swap_horiz_rounded, label: _fmt(clamped)));
   }
 
   Future<void> _onHorizontalDragEnd(DragEndDetails _) async {
-    if (_scrubPreview != null) {
-      await _player.seek(_scrubPreview!);
-    }
-    setState(() {
-      _scrubbing = false;
-      _scrubPreview = null;
-    });
+    if (_scrubPreview != null) await _controller?.seekTo(_scrubPreview!);
+    setState(() { _scrubbing = false; _scrubPreview = null; });
   }
 
-  // ── Navigation par chapitre/marqueur (boutons next/prev) ─────────────────
+  // ── Navigation par marqueur ───────────────────────────────────────────────
 
   void _onPrevButtonTap() {
     final markers = _provider.currentMarkers;
-    if (markers.isEmpty) {
-      _provider.skipPrevious();
-      return;
-    }
+    if (markers.isEmpty) { _provider.skipPrevious(); return; }
     final prev = markers
         .where((m) => m.position < _position - const Duration(seconds: 2))
         .toList();
     if (prev.isEmpty) {
-      _player.seek(Duration.zero);
+      _controller?.seekTo(Duration.zero);
     } else {
-      _player.seek(prev.last.position);
+      _controller?.seekTo(prev.last.position);
     }
   }
 
   void _onNextButtonTap() {
     final markers = _provider.currentMarkers;
-    if (markers.isEmpty) {
-      _provider.skipNext();
-      return;
-    }
+    if (markers.isEmpty) { _provider.skipNext(); return; }
     final next = markers.where((m) => m.position > _position).toList();
     if (next.isEmpty) {
       _provider.skipNext();
     } else {
-      _player.seek(next.first.position);
+      _controller?.seekTo(next.first.position);
     }
   }
 
   // ── Marqueurs ─────────────────────────────────────────────────────────────
 
   Future<void> _addMarkerHere() async {
-    final result = await showMarkerEditorDialog(context, position: _position);
+    final result =
+        await showMarkerEditorDialog(context, position: _position);
     if (result == null || result.delete) return;
-    final label = result.label.isEmpty
-        ? _fmt(_position)
-        : result.label;
+    final label =
+        result.label.isEmpty ? _fmt(_position) : result.label;
     await _provider.addMarker(VideoMarker(
       id: _uuid.v4(),
       position: _position,
@@ -519,24 +458,7 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     ));
   }
 
-  // ── Sous-titres : ouverture du sélecteur ──────────────────────────────────
-
-  void _openTrackPicker() {
-    showModalBottomSheet(
-      context: context,
-      builder: (_) => TrackPickerSheet(
-        tracks: _tracks,
-        currentAudio: _audioTrack,
-        currentSubtitle: _subtitleTrack,
-        onAudioSelected: (t) async {
-          await _player.setAudioTrack(t);
-        },
-        onSubtitleSelected: (t) async {
-          await _player.setSubtitleTrack(t);
-        },
-      ),
-    );
-  }
+  // ── Sous-titres ───────────────────────────────────────────────────────────
 
   void _openSubtitleSettings() {
     showModalBottomSheet(
@@ -550,23 +472,12 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
   }
 
   Future<void> _openSubtitleSearch() async {
-    final path = _provider.currentPath;
-    if (path == null) return;
-    if (!_subsLoaded) {
-      final ext = SubtitleParser.findExternalSubtitleFor(path);
-      if (ext != null) {
-        try {
-          _subEntries = await SubtitleParser.parseFile(ext);
-        } catch (_) {}
-      }
-      _subsLoaded = true;
-    }
     if (!mounted) return;
     showDialog(
       context: context,
       builder: (_) => SubtitleSearchDialog(
         entries: _subEntries,
-        onSeek: _player.seek,
+        onSeek: (pos) => _controller?.seekTo(pos),
       ),
     );
   }
@@ -580,25 +491,6 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 
-  Widget _buildExternalSubtitleButton() {
-    final path = _provider.currentPath;
-    if (path == null) return const SizedBox.shrink();
-    return FutureBuilder<String?>(
-      future: Future.value(SubtitleParser.findExternalSubtitleFor(path)),
-      builder: (_, snap) {
-        final hasExt = snap.data != null;
-        if (!hasExt) return const SizedBox.shrink();
-        return IconButton(
-          icon: const Icon(Icons.subtitles_outlined, color: Colors.white),
-          tooltip: 'Charger sous-titres',
-          onPressed: () async {
-            await _player.setSubtitleTrack(SubtitleTrack.uri(snap.data!));
-          },
-        );
-      },
-    );
-  }
-
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -608,7 +500,7 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
       return Stack(
         fit: StackFit.expand,
         children: [
-          // 1. Vidéo (avec zoom InteractiveViewer)
+          // 1. Vidéo
           ColoredBox(
             color: Colors.black,
             child: InteractiveViewer(
@@ -616,42 +508,53 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
               minScale: 1.0,
               maxScale: 4.0,
               panEnabled: false,
-              child: Video(controller: _videoController, controls: NoVideoControls),
+              child: _controller != null &&
+                      _controller!.value.isInitialized
+                  ? AspectRatio(
+                      aspectRatio: _controller!.value.aspectRatio,
+                      child: VideoPlayer(_controller!),
+                    )
+                  : const SizedBox.expand(),
             ),
           ),
-          // 2. Sous-titres (manipulables)
+          // 2. Sous-titres
           if (_subtitleLines.isNotEmpty)
             VideoSubtitleOverlay(
               lines: _subtitleLines,
               settings: _provider.subtitleSettings,
               onSettingsChanged: _provider.updateSubtitleSettings,
             ),
-          // 3. Couche de gestes (toujours active)
+          // 3. Couche de gestes
           Positioned.fill(
             child: GestureDetector(
               behavior: HitTestBehavior.translucent,
               onTap: _toggleControls,
-              onDoubleTapDown: (d) => _onDoubleTapAt(d.localPosition, size),
+              onDoubleTapDown: (d) =>
+                  _onDoubleTapAt(d.localPosition, size),
               onLongPressStart: (_) => _startHoldSpeed(),
               onLongPressEnd: (_) => _endHoldSpeed(),
-              onVerticalDragStart: (d) => _onVerticalDragStart(d, size),
-              onVerticalDragUpdate: (d) => _onVerticalDragUpdate(d, size),
+              onVerticalDragStart: (d) =>
+                  _onVerticalDragStart(d, size),
+              onVerticalDragUpdate: (d) =>
+                  _onVerticalDragUpdate(d, size),
               onHorizontalDragStart: _onHorizontalDragStart,
-              onHorizontalDragUpdate: (d) => _onHorizontalDragUpdate(d, size),
+              onHorizontalDragUpdate: (d) =>
+                  _onHorizontalDragUpdate(d, size),
               onHorizontalDragEnd: _onHorizontalDragEnd,
             ),
           ),
           // 4. Spinner si bufferisation
           if (_buffering && !_completed)
             const Center(
-              child: CircularProgressIndicator(color: Colors.white),
+              child:
+                  CircularProgressIndicator(color: Colors.white),
             ),
           // 5. Replay si terminé
           if (_completed) _buildReplayOverlay(),
-          // 6. HUD éphémère (seek delta, vitesse ×2…)
+          // 6. HUD éphémère
           if (_hud != null)
             VideoHudIndicator(icon: _hud!.icon, label: _hud!.label),
-          // 6b. Slider vertical éphémère (luminosité / volume)
+          // 6b. Slider vertical éphémère
           if (_vSlider != null)
             VerticalValueSlider(
               topIcon: _vSlider!.kind == _VSliderKind.brightness
@@ -668,7 +571,7 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
                   ? Colors.amberAccent
                   : Colors.lightBlueAccent,
             ),
-          // 7. Contrôles (top + bottom)
+          // 7. Contrôles
           if (_controlsVisible) ...[
             _buildTopBar(),
             _buildBottomBar(),
@@ -689,8 +592,12 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
               iconSize: 64,
               icon: const Icon(Icons.replay_rounded, color: Colors.white),
               onPressed: () {
-                _player.seek(Duration.zero);
-                _player.play();
+                _controller?.seekTo(Duration.zero);
+                _controller?.play();
+                setState(() {
+                  _completed = false;
+                  _completionHandled = false;
+                });
               },
             ),
             const Text('Rejouer',
@@ -725,30 +632,32 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
         child: Row(
           children: [
             IconButton(
-              icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+              icon: const Icon(Icons.arrow_back_rounded,
+                  color: Colors.white),
               onPressed: () => Navigator.maybePop(context),
             ),
             Expanded(
               child: Text(
-                _provider.currentPath?.split(Platform.pathSeparator).last ?? '',
-                style: const TextStyle(color: Colors.white, fontSize: 14),
+                _provider.currentPath
+                        ?.split(Platform.pathSeparator)
+                        .last ??
+                    '',
+                style: const TextStyle(
+                    color: Colors.white, fontSize: 14),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            _buildExternalSubtitleButton(),
-            IconButton(
-              icon: const Icon(Icons.search_rounded, color: Colors.white),
-              tooltip: 'Rechercher dans les sous-titres',
-              onPressed: _openSubtitleSearch,
-            ),
-            IconButton(
-              icon: const Icon(Icons.subtitles_rounded, color: Colors.white),
-              tooltip: 'Pistes & sous-titres',
-              onPressed: _openTrackPicker,
-            ),
+            if (_subEntries.isNotEmpty)
+              IconButton(
+                icon: const Icon(Icons.search_rounded,
+                    color: Colors.white),
+                tooltip: 'Rechercher dans les sous-titres',
+                onPressed: _openSubtitleSearch,
+              ),
             PopupMenuButton<String>(
-              icon: const Icon(Icons.more_vert_rounded, color: Colors.white),
+              icon: const Icon(Icons.more_vert_rounded,
+                  color: Colors.white),
               color: Colors.black87,
               onSelected: (v) {
                 switch (v) {
@@ -780,7 +689,9 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
                     'Ajouter un marqueur'),
                 _menuItem('subSettings', Icons.tune_rounded,
                     'Réglages sous-titres'),
-                _menuItem('resetZoom', Icons.center_focus_strong_rounded,
+                _menuItem(
+                    'resetZoom',
+                    Icons.center_focus_strong_rounded,
                     'Réinitialiser le zoom'),
                 _menuItem(
                     'autoplay',
@@ -801,7 +712,8 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
                         : Icons.repeat_rounded,
                     'Boucle : ${_provider.isRepeat ? "ON" : "OFF"}'),
                 if (widget.onTogglePlaylist != null)
-                  _menuItem('playlist', Icons.queue_music_rounded, 'Playlist'),
+                  _menuItem('playlist', Icons.queue_music_rounded,
+                      'Playlist'),
               ],
             ),
           ],
@@ -810,14 +722,16 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
     );
   }
 
-  PopupMenuItem<String> _menuItem(String value, IconData icon, String label) {
+  PopupMenuItem<String> _menuItem(
+      String value, IconData icon, String label) {
     return PopupMenuItem<String>(
       value: value,
       child: Row(
         children: [
           Icon(icon, size: 18, color: Colors.white70),
           const SizedBox(width: 12),
-          Text(label, style: const TextStyle(color: Colors.white)),
+          Text(label,
+              style: const TextStyle(color: Colors.white)),
         ],
       ),
     );
@@ -828,7 +742,8 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
       bottom: 0, left: 0, right: 0,
       child: Container(
         padding: EdgeInsets.only(
-            left: 12, right: 12,
+            left: 12,
+            right: 12,
             bottom: MediaQuery.of(context).padding.bottom + 8),
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -844,24 +759,32 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
               position: _scrubPreview ?? _position,
               duration: _duration,
               markers: _provider.currentMarkers,
-              onSeek: (pos) => _player.seek(pos),
-              onScrubbing: (pos) {
-                setState(() => _scrubPreview = pos);
-              },
+              onSeek: (pos) => _controller?.seekTo(pos),
+              onScrubbing: (pos) =>
+                  setState(() => _scrubPreview = pos),
               onScrubbingChange: (active) =>
                   setState(() => _scrubbing = active),
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 4),
               child: Row(
                 children: [
-                  Text(_fmt(_scrubPreview ?? _position),
-                      style: const TextStyle(
-                          color: Colors.white, fontFamily: 'monospace', fontSize: 12)),
+                  Text(
+                    _fmt(_scrubPreview ?? _position),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontFamily: 'monospace',
+                        fontSize: 12),
+                  ),
                   const Spacer(),
-                  Text(_fmt(_duration),
-                      style: const TextStyle(
-                          color: Colors.white70, fontFamily: 'monospace', fontSize: 12)),
+                  Text(
+                    _fmt(_duration),
+                    style: const TextStyle(
+                        color: Colors.white70,
+                        fontFamily: 'monospace',
+                        fontSize: 12),
+                  ),
                 ],
               ),
             ),
@@ -885,8 +808,9 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
                         : Icons.play_circle_rounded,
                     color: Colors.white,
                   ),
-                  onPressed: () =>
-                      _playing ? _player.pause() : _player.play(),
+                  onPressed: () => _playing
+                      ? _controller?.pause()
+                      : _controller?.play(),
                 ),
                 GestureDetector(
                   onTap: _onNextButtonTap,
@@ -899,7 +823,8 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
                 ),
                 const SizedBox(width: 12),
                 IconButton(
-                  icon: const Icon(Icons.bookmark_add_outlined,
+                  icon: const Icon(
+                      Icons.bookmark_add_outlined,
                       color: Colors.white),
                   tooltip: 'Marqueur',
                   onPressed: _addMarkerHere,
@@ -913,7 +838,8 @@ class _VideoPlayerViewState extends State<VideoPlayerView>
                         ? AppColors.accent
                         : Colors.white,
                   ),
-                  onPressed: () => _provider.setRepeat(!_provider.isRepeat),
+                  onPressed: () =>
+                      _provider.setRepeat(!_provider.isRepeat),
                 ),
               ],
             ),

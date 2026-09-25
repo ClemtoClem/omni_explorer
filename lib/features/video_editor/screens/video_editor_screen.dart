@@ -4,6 +4,7 @@
 
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:ffmpeg_kit_flutter_new/statistics.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -16,7 +17,10 @@ import '../widgets/trim_slider.dart';
 import '../widgets/trim_timeline.dart';
 
 import '../../../app/theme/app_theme.dart';
+import '../models/export_settings.dart';
 import '../services/export_service.dart';
+import '../services/video_export_service.dart';
+import '../widgets/export_options_sheet.dart';
 import 'video_crop_screen.dart';
 
 class VideoEditorScreen extends StatefulWidget {
@@ -40,12 +44,21 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   bool _exporting = false;
   double _exportProgress = 0;
   String? _exportError;
+  ExportSettings _settings = const ExportSettings();
+  // Zoom de la timeline de trim (maxViewportRatio) : 1× = vue complète,
+  // 8× = timeline 8× plus large (scroll horizontal) pour un découpage précis.
+  double _trimZoom = 2.5;
 
   @override
   void initState() {
     super.initState();
+    // Mode paysage pour maximiser l'espace de prévisualisation et de timeline.
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
     _controller
-        .initialize(aspectRatio: 9 / 16)
+        .initialize(aspectRatio: 16 / 9)
         .then((_) => setState(() {}))
         .catchError((e) {
       if (mounted) setState(() => _exportError = 'Erreur init : $e');
@@ -54,6 +67,8 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
 
   @override
   void dispose() {
+    // Restaure toutes les orientations en quittant l'éditeur.
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     _tabs.dispose();
     _controller.dispose();
     ExportService.disposeAll();
@@ -119,18 +134,45 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
   }
 
   Future<void> _export() async {
+    // 1. Demande les options (qualité, thermique, filtres).
+    final settings = await showExportOptionsSheet(context, initial: _settings);
+    if (settings == null) return;
+    _settings = settings;
+
     setState(() {
       _exporting = true;
       _exportProgress = 0;
       _exportError = null;
     });
-    final config = VideoFFmpegVideoEditorConfig(_controller);
+
+    // 2. Assemble la commande régulée via le commandBuilder du config (qui
+    //    fournit le chemin de sortie et les filtres d'éditeur crop/rotation).
+    final config = VideoFFmpegVideoEditorConfig(
+      _controller,
+      commandBuilder: (cfg, videoPath, outputPath) {
+        // videoPath / outputPath sont déjà entre quotes simples.
+        final c = cfg.controller;
+        return settings.buildFFmpegCommand(
+          videoPath: videoPath.replaceAll("'", ''),
+          outputPath: outputPath.replaceAll("'", ''),
+          startSeconds: c.startTrim.inMilliseconds / 1000.0,
+          durationSeconds: c.trimmedDuration.inMilliseconds / 1000.0,
+          editorVideoFilters: cfg.getExportFilters(),
+        );
+      },
+    );
     final execute = await config.getExecuteConfig();
-    await ExportService.runFFmpegCommand(
-      execute,
+
+    // 3. Export en arrière-plan (service de premier plan + notification).
+    await VideoExportService.export(
+      command: execute.command,
+      outputPath: execute.outputPath,
+      totalDurationMs: _controller.trimmedDuration.inMilliseconds,
+      onProgress: (pr) {
+        if (mounted) setState(() => _exportProgress = pr);
+      },
       onCompleted: _onExportDone,
-      onProgress: _onExportProgress,
-      onError: _onExportError,
+      onError: (e) => _onExportError(e, StackTrace.current),
     );
   }
 
@@ -317,12 +359,33 @@ class _VideoEditorScreenState extends State<VideoEditorScreen>
                       style: const TextStyle(color: Colors.white70)),
                 ],
               ),
-              const SizedBox(height: 8),
+              // ── Zoom timeline (précision du découpage) ──────────────────
+              Row(
+                children: [
+                  const Icon(Icons.zoom_out_rounded,
+                      color: Colors.white54, size: 18),
+                  Expanded(
+                    child: Slider(
+                      value: _trimZoom,
+                      min: 1.0,
+                      max: 8.0,
+                      label: '${_trimZoom.toStringAsFixed(1)}×',
+                      onChanged: (v) => setState(() => _trimZoom = v),
+                    ),
+                  ),
+                  const Icon(Icons.zoom_in_rounded,
+                      color: Colors.white54, size: 18),
+                ],
+              ),
               Expanded(
                 child: TrimSlider(
+                  // Key sur le zoom : force la recréation du slider avec le
+                  // nouveau maxViewportRatio (timeline plus large = plus précis).
+                  key: ValueKey('trim-$_trimZoom'),
                   controller: _controller,
                   height: 60,
                   horizontalMargin: 8,
+                  maxViewportRatio: _trimZoom,
                   child: TrimTimeline(
                     controller: _controller,
                     padding: const EdgeInsets.only(top: 8),

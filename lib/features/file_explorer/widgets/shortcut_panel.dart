@@ -1,8 +1,10 @@
 /// @file shortcut_panel.dart
 /// @brief Panneau latéral des raccourcis et répertoires prédéfinis.
 
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:material_design_icons_flutter/material_design_icons_flutter.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import '../../../core/services/settings_service.dart';
@@ -30,28 +32,145 @@ class _ShortcutPanelState extends State<ShortcutPanel> {
   }
 
   Future<void> _loadLocations() async {
+    final locs = await _platformLocations();
+    if (mounted) setState(() => _defaultLocations = locs);
+  }
+
+  Future<List<_Location>> _platformLocations() async {
+    if (Platform.isAndroid) return _androidLocations();
+    if (Platform.isLinux)   return _filter(_linuxLocations());
+    if (Platform.isWindows) return _filter(_windowsLocations());
+    if (Platform.isMacOS)   return _filter(_macosLocations());
+    if (Platform.isIOS)     return _iosLocations();
+    return const [];
+  }
+
+  // Garde uniquement les répertoires qui existent sur le disque.
+  List<_Location> _filter(List<_Location> locs) =>
+      locs.where((l) => Directory(l.path).existsSync()).toList();
+
+  // ── Android ───────────────────────────────────────────────────────────────
+
+  Future<List<_Location>> _androidLocations() async {
     String base = '/storage/emulated/0';
     try {
       final dirs = await getExternalStorageDirectories();
       if (dirs != null && dirs.isNotEmpty) {
-        var p = dirs.first.path;
-        while (p.contains('/Android')) { p = p.substring(0, p.lastIndexOf('/')); }
-        base = p;
+        var root = dirs.first.path;
+        while (root.contains('/Android')) {
+          root = root.substring(0, root.lastIndexOf('/'));
+        }
+        base = root;
       }
     } catch (_) {}
 
-    if (mounted) {
-      setState(() {
-        _defaultLocations = [
-          _Location(MdiIcons.homeOutline,          'Accueil',          base,               AppColors.accent),
-          _Location(Icons.download_rounded,        'Téléchargements', '$base/Download',  AppColors.colorDoc),
-          _Location(Icons.image_outlined,          'Images',          '$base/DCIM',      AppColors.colorImage),
-          _Location(MdiIcons.filmstrip,            'Vidéos',          '$base/Movies',    AppColors.colorVideo),
-          _Location(MdiIcons.musicNote,            'Musique',         '$base/Music',     AppColors.colorAudio),
-          _Location(Icons.description_outlined,    'Documents',       '$base/Documents', AppColors.colorDoc),
-          _Location(Icons.photo_library_outlined,  'Captures',        '$base/Pictures/Screenshots', AppColors.colorImage),
-        ];
-      });
+    return _filter([
+      _Location(MdiIcons.homeOutline,         'Accueil',         base,                              AppColors.accent),
+      _Location(Icons.download_rounded,       'Téléchargements', p.join(base, 'Download'),          AppColors.colorDoc),
+      _Location(Icons.image_outlined,         'Images',          p.join(base, 'DCIM'),              AppColors.colorImage),
+      _Location(MdiIcons.filmstrip,           'Vidéos',          p.join(base, 'Movies'),            AppColors.colorVideo),
+      _Location(MdiIcons.musicNote,           'Musique',         p.join(base, 'Music'),             AppColors.colorAudio),
+      _Location(Icons.description_outlined,   'Documents',       p.join(base, 'Documents'),         AppColors.colorDoc),
+      _Location(Icons.photo_library_outlined, 'Captures',        p.join(base, 'Pictures', 'Screenshots'), AppColors.colorImage),
+    ]);
+  }
+
+  // ── Linux ─────────────────────────────────────────────────────────────────
+
+  // Fonction utilitaire pour lire le fichier de configuration XDG
+  Map<String, String> _loadXdgUserDirs(String home) {
+    final configPath = p.join(home, '.config', 'user-dirs.dirs');
+    final file = File(configPath);
+    final dirs = <String, String>{};
+
+    if (file.existsSync()) {
+      final lines = file.readAsLinesSync();
+      for (var line in lines) {
+        line = line.trim();
+        // On ignore les commentaires et on cherche les lignes d'assignation
+        if (line.startsWith('XDG_') && line.contains('=')) {
+          final parts = line.split('=');
+          final key = parts[0].trim();
+          // On récupère la valeur, on retire les guillemets et on remplace la variable $HOME
+          var value = parts.sublist(1).join('=').replaceAll('"', '').trim();
+          value = value.replaceAll(r'$HOME', home);
+          dirs[key] = value;
+        }
+      }
+    }
+    return dirs;
+  }
+
+  List<_Location> _linuxLocations() {
+    final home = Platform.environment['HOME'] ?? '/home';
+    
+    // On charge les répertoires XDG depuis le fichier Linux standard
+    final xdgDirs = _loadXdgUserDirs(home);
+
+    // Fonction pour récupérer le chemin : Environnement > Fichier XDG > Fallback
+    String xdg(String key, String fallback) {
+      return Platform.environment[key] ?? xdgDirs[key] ?? p.join(home, fallback);
+    }
+
+    return [
+      _Location(MdiIcons.homeOutline,       'Accueil',         home,                                   AppColors.accent),
+      _Location(Icons.download_rounded,     'Téléchargements', xdg('XDG_DOWNLOAD_DIR',  'Downloads'),  AppColors.colorDoc),
+      _Location(Icons.image_outlined,       'Images',          xdg('XDG_PICTURES_DIR',  'Pictures'),   AppColors.colorImage),
+      _Location(MdiIcons.filmstrip,         'Vidéos',          xdg('XDG_VIDEOS_DIR',    'Videos'),     AppColors.colorVideo),
+      _Location(MdiIcons.musicNote,         'Musique',         xdg('XDG_MUSIC_DIR',     'Music'),      AppColors.colorAudio),
+      _Location(Icons.description_outlined, 'Documents',       xdg('XDG_DOCUMENTS_DIR', 'Documents'),  AppColors.colorDoc),
+      _Location(Icons.desktop_mac_rounded,  'Bureau',          xdg('XDG_DESKTOP_DIR',   'Desktop'),    AppColors.colorFolder),
+      _Location(Icons.storage_rounded,      'Racine',          '/',                                    AppColors.colorFolder),
+    ];
+  }
+
+  // ── Windows ───────────────────────────────────────────────────────────────
+
+  List<_Location> _windowsLocations() {
+    final home = Platform.environment['USERPROFILE'] ??
+        (Platform.environment['HOMEDRIVE'] != null
+            ? '${Platform.environment['HOMEDRIVE']}${Platform.environment['HOMEPATH'] ?? ''}'
+            : 'C:\\Users\\User');
+
+    return [
+      _Location(MdiIcons.homeOutline,         'Accueil',         home,                              AppColors.accent),
+      _Location(Icons.download_rounded,       'Téléchargements', p.join(home, 'Downloads'),          AppColors.colorDoc),
+      _Location(Icons.image_outlined,         'Images',          p.join(home, 'Pictures'),           AppColors.colorImage),
+      _Location(MdiIcons.filmstrip,           'Vidéos',          p.join(home, 'Videos'),             AppColors.colorVideo),
+      _Location(MdiIcons.musicNote,           'Musique',         p.join(home, 'Music'),              AppColors.colorAudio),
+      _Location(Icons.description_outlined,   'Documents',       p.join(home, 'Documents'),          AppColors.colorDoc),
+      _Location(Icons.desktop_mac_rounded,    'Bureau',          p.join(home, 'Desktop'),            AppColors.colorFolder),
+      _Location(Icons.storage_rounded,        'Lecteur C:',      'C:\\',                            AppColors.colorFolder),
+    ];
+  }
+
+  // ── macOS ─────────────────────────────────────────────────────────────────
+
+  List<_Location> _macosLocations() {
+    final home = Platform.environment['HOME'] ?? '/Users/user';
+
+    return [
+      _Location(MdiIcons.homeOutline,         'Accueil',         home,                          AppColors.accent),
+      _Location(Icons.download_rounded,       'Téléchargements', p.join(home, 'Downloads'),      AppColors.colorDoc),
+      _Location(Icons.image_outlined,         'Images',          p.join(home, 'Pictures'),       AppColors.colorImage),
+      _Location(MdiIcons.filmstrip,           'Vidéos',          p.join(home, 'Movies'),         AppColors.colorVideo),
+      _Location(MdiIcons.musicNote,           'Musique',         p.join(home, 'Music'),          AppColors.colorAudio),
+      _Location(Icons.description_outlined,   'Documents',       p.join(home, 'Documents'),      AppColors.colorDoc),
+      _Location(Icons.desktop_mac_rounded,    'Bureau',          p.join(home, 'Desktop'),        AppColors.colorFolder),
+      _Location(Icons.storage_rounded,        'Macintosh HD',    '/',                           AppColors.colorFolder),
+    ];
+  }
+
+  // ── iOS ───────────────────────────────────────────────────────────────────
+
+  Future<List<_Location>> _iosLocations() async {
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      return [
+        _Location(Icons.description_outlined, 'Documents', docs.path, AppColors.colorDoc),
+      ];
+    } catch (_) {
+      return const [];
     }
   }
 

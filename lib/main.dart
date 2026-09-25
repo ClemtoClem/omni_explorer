@@ -11,7 +11,7 @@ import 'package:flutter/services.dart' show DeviceOrientation;
 import 'package:provider/provider.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:intl/date_symbol_data_local.dart';
-import 'package:media_kit/media_kit.dart';
+import 'package:fvp/fvp.dart' as fvp;
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import 'app/theme/app_theme.dart';
@@ -22,12 +22,17 @@ import 'core/utils/system_ui.dart';
 import 'features/home/screens/feature_launcher_screen.dart';
 import 'features/text_editor/screens/unified_editor_screen.dart';
 import 'features/media_player/providers/media_player_provider.dart';
+import 'features/video_editor/services/video_export_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
+  // Enregistre fvp comme implémentation video_player sur Linux/Windows/macOS
+  // (binaires FFmpeg/mpv précompilés — aucune dépendance système requise).
+  if (!kIsWeb && (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
+    fvp.registerWith();
+  }
 
   await initializeDateFormatting('fr_FR', null);
 
@@ -74,6 +79,11 @@ Future<void> main() async {
   final appState = AppStateService();
   try { await appState.init(); } catch (e) {
     debugPrint('[AppState] init error : $e');
+  }
+
+  // Service d'export vidéo en arrière-plan + notifications.
+  try { await VideoExportService.init(); } catch (e) {
+    debugPrint('[VideoExport] init error : $e');
   }
 
   runApp(
