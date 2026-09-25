@@ -182,11 +182,13 @@ void main() {
     doc.setPassword('mot de passe');
     await doc.save();
 
-    // Sans mot de passe, le contenu n'est pas lisible.
-    await expectLater(() async {
-      final d = await ArchiveDocument.open(doc.path);
-      d.readFile('README.md');
-    }(), throwsA(anything));
+    // Sans mot de passe ou avec un mauvais : refus explicite à l'ouverture.
+    await expectLater(
+        ArchiveDocument.open(doc.path),
+        throwsA(isA<ArchiveOpException>()
+            .having((e) => e.isPasswordRequired, 'mot de passe requis', true)));
+    await expectLater(ArchiveDocument.open(doc.path, password: 'faux'),
+        throwsA(isA<ArchiveOpException>()));
 
     doc = await ArchiveDocument.open(doc.path, password: 'mot de passe');
     expect(String.fromCharCodes(doc.readFile('README.md')), 'lisez-moi');

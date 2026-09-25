@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import 'package:omni_explorer/core/services/file_operations_service.dart';
 import 'package:omni_explorer/features/archive/models/archive_entry.dart';
+import 'package:omni_explorer/features/archive/services/archive_document.dart';
 import 'package:omni_explorer/features/archive/services/archive_service.dart';
 
 /// Fichier d'archive dont le contenu est [text].
@@ -264,11 +265,15 @@ void main() {
       File(other).writeAsStringSync('autre');
 
       await ArchiveService.createZip(zip, [src]);
-      await ArchiveService.addFilesToZip(zip, [other]);
+      var doc = await ArchiveDocument.open(zip);
+      await doc.addFromDisk([other], '');
+      await doc.save();
       var entries = await ArchiveService.listEntries(zip);
       expect(entries.map((e) => e.fullPath).toSet(), {'src.txt', 'other.txt'});
 
-      await ArchiveService.removeFromZip(zip, ['src.txt']);
+      doc = await ArchiveDocument.open(zip);
+      doc.delete(['src.txt']);
+      await doc.save();
       entries = await ArchiveService.listEntries(zip);
       expect(entries.map((e) => e.fullPath), ['other.txt']);
 

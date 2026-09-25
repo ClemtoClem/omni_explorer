@@ -64,9 +64,6 @@ extension ArchiveTypeExt on ArchiveType {
         _ => false,
       };
 
-  /// Ancien nom de [canEdit], utilisé par l'écran jusqu'à son remplacement.
-  bool get supportsInPlaceEdit => canEdit;
-
   /// Pourquoi l'archive est en lecture seule (`null` si [canEdit]).
   String? get readOnlyReason => switch (this) {
         _ when canEdit => null,

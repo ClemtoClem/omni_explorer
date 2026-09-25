@@ -6,6 +6,7 @@ import '../../../core/services/file_operations_service.dart';
 import '../../../core/utils/atomic_write.dart';
 import '../../../core/utils/safe_path.dart';
 import '../models/archive_entry.dart';
+import '../models/archive_tree.dart';
 
 typedef _ByteDecoder = List<int> Function(List<int>);
 
@@ -581,73 +582,120 @@ class ArchiveService {
     final archive = _decodeMulti(type, bytes, password: password);
     // L'entrée elle-même ou ses descendants — et non tout nom qui commence
     // par les mêmes caractères (« doc » ne doit pas inclure « docs/… »).
+    // Comparaison sur les chemins normalisés (« ./src/a.txt » = « src/a.txt »),
+    // comme dans l'arborescence affichée ; l'entrée elle-même ou ses
+    // descendants, pas un simple préfixe de caractères (« doc » ≠ « docs/… »).
+    final wanted = ArchiveTree.normalize(entryPath);
     final selected = archive.files.where((f) {
-      final norm = f.name.endsWith('/')
-          ? f.name.substring(0, f.name.length - 1)
-          : f.name;
-      return norm == entryPath || norm.startsWith('$entryPath/');
+      final norm = ArchiveTree.normalize(f.name);
+      return norm == wanted || norm.startsWith('$wanted/');
     }).toList();
     return _writeArchive(selected, destDir, null, onConflict: onConflict);
   }
 
   // ── Création d'archive ────────────────────────────────────────────────────
 
+  /// Formats de création proposés sur cette plateforme. GZ et BZ2 ne
+  /// compressent qu'un fichier unique ; 7z passe par l'outil externe
+  /// (Linux, s'il est installé).
+  static Future<List<ArchiveType>> creatableTypes() async => [
+        ArchiveType.zip,
+        ArchiveType.tar,
+        ArchiveType.tarGz,
+        ArchiveType.tarBz2,
+        ArchiveType.gz,
+        ArchiveType.bz2,
+        if (!Platform.isAndroid && await find7z() != null) ArchiveType.sevenZip,
+      ];
+
+  /// Extension de fichier conventionnelle de [type].
+  static String extensionOf(ArchiveType type) => switch (type) {
+        ArchiveType.zip || ArchiveType.jar => 'zip',
+        ArchiveType.tar => 'tar',
+        ArchiveType.tarGz => 'tar.gz',
+        ArchiveType.tarBz2 => 'tar.bz2',
+        ArchiveType.tarXz => 'tar.xz',
+        ArchiveType.gz => 'gz',
+        ArchiveType.bz2 => 'bz2',
+        ArchiveType.xz => 'xz',
+        ArchiveType.sevenZip => '7z',
+        ArchiveType.rar => 'rar',
+        ArchiveType.unknown => '',
+      };
+
+  /// Crée l'archive [destPath] au format [type] à partir de [sourcePaths]
+  /// (fichiers et dossiers, récursivement ; les liens symboliques ne sont
+  /// pas suivis). Refuse d'écraser une archive existante. [password] :
+  /// ZIP chiffré en AES (natif, toutes plateformes) ou 7z.
+  static Future<void> createArchive(
+    String destPath,
+    List<String> sourcePaths,
+    ArchiveType type, {
+    String? password,
+    void Function(double)? onProgress,
+  }) async {
+    _ensureNewArchive(destPath);
+    if (type == ArchiveType.sevenZip) {
+      return create7z(destPath, sourcePaths, password: password);
+    }
+    if (password != null &&
+        !(type == ArchiveType.zip || type == ArchiveType.jar)) {
+      throw ArchiveOpException('${type.label} : pas de mot de passe possible.');
+    }
+    if (type.isSingleFile) {
+      if (sourcePaths.length != 1 ||
+          FileSystemEntity.typeSync(sourcePaths.single, followLinks: false) !=
+              FileSystemEntityType.file) {
+        throw ArchiveOpException('${type.label} compresse un seul fichier : '
+            'choisissez TAR.GZ ou ZIP pour plusieurs éléments.');
+      }
+      final data = await File(sourcePaths.single).readAsBytes();
+      final out = switch (type) {
+        ArchiveType.gz => const arc.GZipEncoder().encodeBytes(data),
+        ArchiveType.bz2 => arc.BZip2Encoder().encodeBytes(data),
+        _ => throw ArchiveOpException('${type.label} : création impossible.'),
+      };
+      onProgress?.call(1);
+      return AtomicWrite.bytes(destPath, out);
+    }
+
+    final archive = arc.Archive();
+    for (var i = 0; i < sourcePaths.length; i++) {
+      await _addToArchive(archive, sourcePaths[i], p.basename(sourcePaths[i]));
+      onProgress?.call((i + 1) / sourcePaths.length);
+    }
+    final Uint8List bytes = switch (type) {
+      ArchiveType.zip ||
+      ArchiveType.jar =>
+        arc.ZipEncoder(password: password).encodeBytes(archive),
+      ArchiveType.tar => arc.TarEncoder().encodeBytes(archive),
+      ArchiveType.tarGz => const arc.GZipEncoder()
+          .encodeBytes(arc.TarEncoder().encodeBytes(archive)),
+      ArchiveType.tarBz2 =>
+        arc.BZip2Encoder().encodeBytes(arc.TarEncoder().encodeBytes(archive)),
+      _ => throw ArchiveOpException(
+          '${type.label} : création non disponible (${type.readOnlyReason})'),
+    };
+    await AtomicWrite.bytes(destPath, bytes);
+  }
+
+  /// ZIP (chiffré en AES si [password]).
   static Future<void> createZip(
     String destPath,
     List<String> sourcePaths, {
     String? password,
     void Function(double)? onProgress,
-  }) async {
-    _ensureNewArchive(destPath);
-    if (password != null) {
-      final cmd = await find7z();
-      if (cmd == null) {
-        throw const ArchiveOpException(
-          'p7zip requis pour chiffrer les archives ZIP.',
-        );
-      }
-      await _produceThenRename(
-          destPath,
-          (tmp) => _run7z(cmd, [
-                'a',
-                '-tzip',
-                '-p$password',
-                '-mem=AES256',
-                tmp,
-                ...sourcePaths
-              ]));
-      return;
-    }
-    final archive = arc.Archive();
-    final total = sourcePaths.length;
-    var done = 0;
-    for (final src in sourcePaths) {
-      await _addToArchive(archive, src, p.basename(src));
-      done++;
-      onProgress?.call(done / total);
-    }
-    await AtomicWrite.bytes(destPath, _encodeZip(archive));
-  }
+  }) =>
+      createArchive(destPath, sourcePaths, ArchiveType.zip,
+          password: password, onProgress: onProgress);
 
   static Future<void> createTarGz(
     String destPath,
     List<String> sourcePaths, {
     void Function(double)? onProgress,
-  }) async {
-    _ensureNewArchive(destPath);
-    final archive = arc.Archive();
-    final total = sourcePaths.length;
-    var done = 0;
-    for (final src in sourcePaths) {
-      await _addToArchive(archive, src, p.basename(src));
-      done++;
-      onProgress?.call(done / total);
-    }
-    final tarBytes = arc.TarEncoder().encode(archive);
-    final gzBytes =
-        const arc.GZipEncoder().encode(Uint8List.fromList(tarBytes));
-    await AtomicWrite.bytes(destPath, gzBytes);
-  }
+  }) =>
+      createArchive(destPath, sourcePaths, ArchiveType.tarGz,
+          onProgress: onProgress);
 
   static Future<void> create7z(
     String destPath,
@@ -714,72 +762,8 @@ class ArchiveService {
     if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
   }
 
-  static List<int> _encodeZip(arc.Archive archive) =>
-      arc.ZipEncoder().encode(archive);
-
-  // ── Modification ZIP ──────────────────────────────────────────────────────
-
-  static Future<void> addFilesToZip(
-    String archivePath,
-    List<String> filePaths,
-  ) async {
-    final bytes = await File(archivePath).readAsBytes();
-    final archive = arc.ZipDecoder().decodeBytes(bytes);
-    for (final path in filePaths) {
-      await _addToArchive(archive, path, p.basename(path));
-    }
-    await AtomicWrite.bytes(archivePath, _encodeZip(archive));
-  }
-
-  static Future<void> removeFromZip(
-    String archivePath,
-    List<String> entryPaths,
-  ) async {
-    final bytes = await File(archivePath).readAsBytes();
-    final archive = arc.ZipDecoder().decodeBytes(bytes);
-    final newArchive = arc.Archive();
-    for (final file in archive.files) {
-      final norm = file.name.endsWith('/')
-          ? file.name.substring(0, file.name.length - 1)
-          : file.name;
-      if (!entryPaths.contains(norm)) {
-        newArchive.addFile(file);
-      }
-    }
-    await AtomicWrite.bytes(archivePath, _encodeZip(newArchive));
-  }
-
-  // ── Gestion du mot de passe (ZIP seulement) ───────────────────────────────
-
-  static Future<void> setPassword(
-    String archivePath,
-    String newPassword,
-  ) async {
-    final tempDir = await Directory.systemTemp.createTemp('omni_arch_');
-    try {
-      await extractAll(archivePath, tempDir.path);
-      final sources = await tempDir.list().map((e) => e.path).toList();
-      // L'original reste intact jusqu'au renommage final (atomique).
-      await _produceThenRename(
-          archivePath, (tmp) => createZip(tmp, sources, password: newPassword));
-    } finally {
-      await tempDir.delete(recursive: true);
-    }
-  }
-
-  static Future<void> removePassword(
-    String archivePath,
-    String currentPassword,
-  ) async {
-    final tempDir = await Directory.systemTemp.createTemp('omni_arch_');
-    try {
-      await extractAll(archivePath, tempDir.path, password: currentPassword);
-      final sources = await tempDir.list().map((e) => e.path).toList();
-      await _produceThenRename(archivePath, (tmp) => createZip(tmp, sources));
-    } finally {
-      await tempDir.delete(recursive: true);
-    }
-  }
+  // Modification d'archive : voir ArchiveDocument (ajout, renommage,
+  // déplacement, suppression, mot de passe…).
 
   // ── CLI helpers ───────────────────────────────────────────────────────────
 
@@ -805,19 +789,27 @@ class ArchiveService {
 
   // ── Helpers internes ──────────────────────────────────────────────────────
 
+  /// Ajoute [path] (fichier ou dossier, récursivement) sous [archivePath].
+  /// Les liens symboliques ne sont pas suivis (un lien vers un dossier
+  /// parent bouclerait) : ils sont ignorés.
   static Future<void> _addToArchive(
     arc.Archive archive,
     String path,
     String archivePath,
   ) async {
-    final type = FileSystemEntity.typeSync(path);
+    final type = FileSystemEntity.typeSync(path, followLinks: false);
     if (type == FileSystemEntityType.file) {
       final bytes = await File(path).readAsBytes();
-      archive.addFile(arc.ArchiveFile(archivePath, bytes.length, bytes));
+      final file = arc.ArchiveFile.bytes(archivePath, bytes);
+      final stat = FileStat.statSync(path);
+      file.lastModTime = stat.modified.millisecondsSinceEpoch ~/ 1000;
+      file.mode = stat.mode & 0x1FF;
+      archive.addFile(file);
     } else if (type == FileSystemEntityType.directory) {
-      // Constructeur dédié d'archive 4 pour une entrée « dossier ».
       archive.addFile(arc.ArchiveFile.directory('$archivePath/'));
-      await for (final entity in Directory(path).list()) {
+      final children = await Directory(path).list(followLinks: false).toList()
+        ..sort((a, b) => a.path.compareTo(b.path));
+      for (final entity in children) {
         await _addToArchive(
           archive,
           entity.path,

@@ -130,6 +130,9 @@ class ArchiveDocument {
     }
 
     final archive = _decode(type, bytes, password);
+    if (type == ArchiveType.zip || type == ArchiveType.jar) {
+      _checkPassword(archive, password);
+    }
     for (final f in archive.files) {
       if (f.isSymbolicLink) continue; // jamais recréés (voir P0.1)
       final key = ArchiveTree.normalize(f.name);
@@ -144,6 +147,31 @@ class ArchiveDocument {
       );
     }
     return ArchiveDocument._(archivePath, type, password, entries);
+  }
+
+  /// Lit un fichier et contrôle son CRC32 : un ZIP chiffré ouvert sans
+  /// mot de passe, ou avec un mauvais, échoue ici plutôt qu'à l'extraction
+  /// (ZipCrypto peut produire un contenu faux sans lever d'erreur).
+  static void _checkPassword(arc.Archive archive, String? password) {
+    final probe = archive.files
+        .where((f) => f.isFile && !f.isSymbolicLink && f.size > 0)
+        .firstOrNull;
+    if (probe == null) return;
+    bool ok;
+    try {
+      final data = probe.readBytes();
+      ok = data != null &&
+          (probe.crc32 == null || arc.getCrc32(data) == probe.crc32);
+    } catch (_) {
+      ok = false; // déchiffrement impossible : mot de passe absent ou faux
+    }
+    if (!ok) {
+      throw ArchiveOpException(
+          password == null
+              ? 'Cette archive est protégée par un mot de passe.'
+              : 'Mot de passe incorrect.',
+          isPasswordRequired: true);
+    }
   }
 
   static arc.Archive _decode(ArchiveType type, List<int> bytes, String? pw) {
