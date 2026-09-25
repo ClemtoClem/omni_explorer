@@ -834,3 +834,136 @@ Branche : `p0/secrets`
 - L'Android Lint signalera que `dataExtractionRules` n'a d'effet qu'à partir
   de l'API 31 : c'est attendu, `allowBackup` couvre les versions
   antérieures.
+
+### P1.1 : coffre-fort de mots de passe (cœur)
+
+Branche : `p1/vault`
+
+**Point de départ** : l'écran du coffre-fort n'était qu'un texte « en cours de
+développement ». Aucune cryptographie, aucun stockage.
+
+**Dépendances**
+- `sodium` 4.1.1 (libsodium 1.0.22). `sodium_libs`, choisi à l'origine, est
+  déprécié au profit de ce paquet (même API). Ses « build hooks » **compilent
+  libsodium depuis ses sources**, fournies avec le paquet et signées, pour
+  Android (NDK) comme pour Linux. Aucun binaire précompilé, ce qui convient à
+  F-Droid ; vérifié dans les deux builds (`libsodium.so` pour arm64-v8a,
+  armeabi-v7a, x86_64 et Linux x64).
+- `archive` passe de 3.6 à 4.3, **exigé par `sodium`**. Adaptations : les
+  encodeurs ne renvoient plus `null`, les entrées « lien » et « dossier » ont
+  des constructeurs dédiés. Les 21 tests d'archives (dont Zip Slip) passent
+  sans changement de comportement ; un test vérifie en plus qu'un dossier vide
+  reste un dossier dans une archive créée (il passait déjà avec l'ancien
+  appel : c'est une non-régression, pas une correction).
+
+**Cryptographie** (`services/vault_crypto.dart`)
+- **KEK** dérivée du mot de passe maître par **Argon2id** (3 passes,
+  128 Mio, sel aléatoire de 16 octets), calculée dans un isolate pour ne pas
+  figer l'interface. Mesure : 0,05 s (64 Mio) à 0,33 s (256 Mio) sur PC ;
+  128 Mio sont un compromis pour les téléphones modestes.
+- **DEK** aléatoire de 32 octets, qui chiffre le contenu en
+  **XChaCha20-Poly1305** ; elle est elle-même chiffrée par la KEK. Les clés
+  sont gardées en mémoire native (`SecureKey`), effacées au verrouillage.
+- **Format de fichier versionné** : `OMNIVLT1` | longueur | en-tête JSON
+  (paramètres Argon2id, sel, DEK chiffrée, nonces) | contenu chiffré.
+  **Tout ce qui précède le contenu est authentifié** (données associées) : la
+  moindre modification de l'en-tête ou du contenu est détectée. Un format ou
+  un schéma plus récent est refusé avec un message clair. Le contenu a son
+  propre numéro de schéma et une table de migrations. Les fichiers malformés
+  (tronqué, signature, longueur, paramètres, algorithme) sont rejetés sans
+  plantage.
+
+**Fichier** (`services/vault_repository.dart`)
+- Dossier privé de l'application (Linux : droits 700) ; sauvegarde Android
+  désactivée depuis P0.7.
+- Chaque sauvegarde **copie la version actuelle dans `.bak`**, puis écrit la
+  nouvelle de façon atomique. Si le fichier principal est endommagé, la
+  version précédente peut être ouverte, puis réinstallée.
+- En cas d'échec d'écriture, le fichier et le contenu en mémoire restent
+  inchangés.
+- **Changement du mot de passe maître** : vérification du mot de passe
+  actuel (comparaison en temps constant), puis **sel, KEK et DEK
+  renouvelés**.
+
+**Session et sécurité** (`providers/vault_session.dart`, `services/…`)
+- **Verrouillage automatique** : après 5 min sans interaction, 60 s après
+  le passage en arrière-plan (le temps d'aller coller un mot de passe), et
+  immédiatement si l'application se termine. Le verrouillage efface les clés,
+  le contenu déchiffré et le presse-papiers.
+- **Presse-papiers** : effacé 30 s après une copie. Sur Android, la copie est
+  marquée « sensible » (Android 13+ ne l'affiche pas en aperçu), et
+  l'effacement se fait côté natif. Une application en arrière-plan ne peut
+  plus lire le presse-papiers (Android 10+) : si la vérification est
+  impossible, l'effacement a lieu quand même.
+- **Captures d'écran bloquées** (`FLAG_SECURE`) tant qu'un écran du coffre
+  est affiché ; la vignette dans les applications récentes est masquée
+  (`lib/core/utils/secure_window.dart`, canal natif dans `MainActivity.kt`).
+- **Générateur de mots de passe** : `Random.secure()` (générateur
+  cryptographique, tirage sans biais), au moins un caractère de chaque
+  famille choisie, mélange de Fisher-Yates, option « sans caractères
+  ambigus », estimation de l'entropie.
+
+**Interface**
+- Création : double saisie, 8 caractères minimum, avertissement « aucune
+  récupération possible ».
+- Déverrouillage : erreur claire en cas de mauvais mot de passe ; reprise
+  sur la version précédente si le fichier est endommagé ; « Mot de passe
+  oublié… » (suppression du coffre, confirmée par la saisie de SUPPRIMER).
+- Liste avec recherche (titre, identifiant, adresse ; jamais le mot de
+  passe), copie de l'identifiant ou du mot de passe, bouton de verrouillage,
+  changement du mot de passe maître.
+- Entrée : titre, identifiant, mot de passe (masqué, générateur, copie),
+  adresse, notes ; clavier sans suggestions ni apprentissage ; confirmation
+  avant d'abandonner des modifications ; l'écran se ferme si le coffre se
+  verrouille.
+
+**Validation**
+- 40 tests dans `test/features/password_vault/` :
+  - chiffrement (11 tests) : aller-retour, aucune donnée en clair dans le
+    fichier, sel et nonces neufs à chaque sauvegarde, mauvais mot de passe,
+    contenu et en-tête modifiés, format et schéma trop récents, fichiers
+    malformés ;
+  - fichier (12 tests) : création, refus d'écraser, sauvegarde et `.bak`,
+    échec d'écriture sans perte, reprise après corruption, changement de mot
+    de passe, effacement au verrouillage, suppression, droits 700 ;
+  - session (6 tests) : cycle complet, verrouillage par inactivité et en
+    arrière-plan, interaction qui repousse le verrouillage, presse-papiers
+    vidé, échec de sauvegarde ;
+  - générateur (6 tests), presse-papiers (3 tests) ;
+  - interface (2 tests de widget) : parcours créer → ajouter → verrouiller →
+    mauvais puis bon mot de passe, recherche.
+- Tests de mutation : en-tête non authentifié, mot de passe actuel non
+  vérifié, pas de `.bak`, contenu non effacé au verrouillage, générateur
+  sans garantie de famille : chacun de ces sabotages fait échouer des tests.
+  Le quatrième n'était pas détecté au départ ; le test manquant a été ajouté.
+- `flutter test` : 216 tests réussis (deux exécutions complètes).
+  `flutter analyze` : 0 erreur, 0 avertissement (12 remarques de style
+  préexistantes). `flutter build apk --debug` et `flutter build linux
+  --debug` : réussis.
+
+**Découvertes pendant les tests**
+- Un `Process.run` (le `chmod 700` du dossier sous Linux), lancé depuis
+  l'interface, ne rendait jamais la main dans les tests de widget : il est
+  remplacé par `Process.runSync`, appelé une seule fois.
+- La dérivation par isolate ne peut pas être pilotée par les tests de widget
+  (horloge fictive) : ces tests la désactivent (`useIsolate: false`) ; le
+  chemin par isolate est couvert par les tests unitaires.
+
+**Pas encore fait (P1.1b)**
+- **Déverrouillage biométrique** (Android) : il faut une clé du Keystore
+  exigeant l'authentification de l'utilisateur pour protéger la DEK. Le
+  format à deux niveaux de clés le permet sans changer le fichier, mais il
+  faut du code natif (BiometricPrompt) ou une dépendance supplémentaire, à
+  décider.
+- **Export et import chiffrés** du coffre, d'autant plus utiles que la
+  sauvegarde Android est désactivée.
+- Calibrage d'Argon2id selon l'appareil, et renforcement automatique des
+  paramètres d'un ancien coffre à l'ouverture.
+- Délais de verrouillage réglables dans les paramètres.
+
+**Limites connues**
+- Le mot de passe maître saisi est une chaîne Dart, qui ne peut pas être
+  effacée de la mémoire : seules ses copies en octets et les clés le sont.
+- Pas de test sur un appareil réel : `FLAG_SECURE`, le presse-papiers
+  sensible et le temps d'Argon2id sur téléphone restent à vérifier en
+  conditions réelles.
