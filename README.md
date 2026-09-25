@@ -967,3 +967,87 @@ développement ». Aucune cryptographie, aucun stockage.
 - Pas de test sur un appareil réel : `FLAG_SECURE`, le presse-papiers
   sensible et le temps d'Argon2id sur téléphone restent à vérifier en
   conditions réelles.
+
+### P1.1b : export et import du coffre par paquet verrouillé
+
+Branche : `p1/vault-export`
+
+**Décisions**
+- Pas de déverrouillage biométrique : l'appareil cible n'a pas de capteur
+  d'empreinte.
+- Export et import passent par un **paquet verrouillé avec le mot de passe
+  du coffre**.
+
+**Format du paquet** (`.omnivault`)
+- Même format et même chiffrement que le coffre (Argon2id,
+  XChaCha20-Poly1305, en-tête authentifié), avec une **signature distincte**
+  (`OMNIEXP1`) : un export ne peut pas être pris pour le coffre, ni
+  l'inverse. Une nouvelle clé de données est tirée pour chaque export.
+- Ce n'est pas un ZIP à mot de passe : sur Android, le chiffrement ZIP
+  passerait par 7z (absent), et le ZipCrypto standard est faible.
+
+**Export** (menu du coffre → « Exporter… »)
+- Le mot de passe maître doit être **ressaisi** et est vérifié (précaution
+  si le téléphone est laissé déverrouillé).
+- Le paquet est protégé par ce mot de passe maître. Nom proposé :
+  `coffre-omniexplorer-AAAA-MM-JJ.omnivault`. Sur Android, c'est le
+  sélecteur du système qui l'enregistre ; sur Linux, écriture atomique à
+  l'emplacement choisi.
+
+**Import** (menu → « Importer… »)
+- Le paquet est déchiffré avec le mot de passe du coffre qui l'a créé
+  (celui en vigueur au moment de l'export) : il peut donc venir d'un autre
+  coffre ou d'un autre appareil.
+- **Aperçu avant toute modification** :
+  - entrées nouvelles ;
+  - entrées identiques à une existante, ignorées ;
+  - conflits, c'est-à-dire une entrée qui correspond à une existante (même
+    identifiant interne, ou même titre, identifiant et adresse) mais dont le
+    contenu diffère. Au choix : garder les deux (l'importée reçoit
+    « (importé) » dans son titre), remplacer (l'entrée existante garde son
+    identifiant), ou garder celles du coffre.
+- Refus clairs : fichier qui n'est pas un export, fichier de plus de 32 Mio,
+  export modifié ou endommagé, mauvais mot de passe (qui s'affiche sous le
+  champ, sans fermer le dialogue).
+- Sur Android, la copie du fichier que le sélecteur dépose dans le cache est
+  supprimée après l'import.
+
+**Code**
+- `services/vault_crypto.dart` : signature paramétrable (coffre / export).
+- `services/vault_repository.dart` : `verifyPassword` (extrait de
+  `changePassword`), `exportPackage`, `readExportPackage`.
+- `services/vault_merge.dart` : analyse (`plan`) puis application
+  (`apply`) de la fusion, en pur Dart.
+- `providers/vault_session.dart` : `exportPackage`, `previewImport` (ne
+  modifie rien), `applyImport`.
+- `widgets/vault_transfer_dialogs.dart` : dialogues d'export et d'import.
+
+**Validation**
+- 15 nouveaux tests :
+  - `test/features/password_vault/vault_export_test.dart` (8 tests) :
+    mot de passe exigé, aller-retour, signature d'export, aucune donnée en
+    clair, import dans un autre coffre avec le mot de passe d'origine,
+    export avant et après un changement de mot de passe, fichier du coffre
+    ou quelconque refusé, export modifié, taille maximale ; aperçu sans
+    modification puis application persistée ;
+  - `test/features/password_vault/vault_merge_test.dart` (7 tests) :
+    classement nouveau / identique / conflit (par identifiant ou par
+    compte), doublons dans l'export, les trois stratégies, identifiant
+    conservé en cas de remplacement depuis un autre coffre, identifiants
+    toujours uniques.
+- Tests de mutation : export sans vérification du mot de passe, export avec
+  la signature du coffre, fusion sans rapprochement par compte, remplacement
+  qui prend l'identifiant importé : chacun de ces sabotages fait échouer des
+  tests. Le dernier n'était pas détecté au départ ; le test « remplacer
+  depuis un autre coffre » a été ajouté.
+- `flutter test` : 231 tests réussis (deux exécutions complètes).
+  `flutter analyze` : 0 erreur, 0 avertissement (12 remarques de style
+  préexistantes). `flutter build apk --debug` et `flutter build linux
+  --debug` : réussis.
+
+**Limites**
+- Les dialogues d'export et d'import eux-mêmes ne sont pas couverts par des
+  tests de widget (le sélecteur de fichiers est natif) ; la logique qu'ils
+  appellent l'est.
+- À vérifier sur téléphone : l'enregistrement via le sélecteur Android et
+  l'import depuis un autre appareil.
