@@ -40,15 +40,18 @@ import '../../../core/widgets/custom_keyboard.dart';
 import '../languages/language_registry.dart';
 import '../widgets/terminal_panel.dart';
 import '../completions/language_completions.dart';
+import '../models/editor_view_mode.dart';
 import '../models/workspace_settings.dart';
 import '../services/editor_intelligence.dart';
+import '../services/editor_open_policy.dart';
 import '../services/hex_file_io.dart';
 import '../services/workspace_service.dart';
 import 'workspace_settings_screen.dart';
 
+export '../models/editor_view_mode.dart';
+
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-enum EditorViewMode { code, markdown, text, richText, hex }
 
 const int _hexBytesPerRow = 8;
 
@@ -502,8 +505,11 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     _scanWorkspaceSymbols(dir);
   }
 
+  /// Collecte les symboles des fichiers de code du projet (autocomplétion).
+  /// Bornée : fichiers volumineux ignorés, nombre de fichiers limité.
   Future<void> _scanWorkspaceSymbols(String dir) async {
     final symbols = <String>{};
+    var scanned = 0;
     try {
       await for (final e
           in Directory(dir).list(recursive: true, followLinks: false)) {
@@ -511,7 +517,10 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
         final ext = FileUtils.extOf(e.path);
         final lang = LanguageRegistry.instance.forExtension(ext);
         if (lang == null) continue;
+        if (scanned >= EditorLimits.symbolScanMaxFiles) break;
         try {
+          if (await e.length() > EditorLimits.symbolScanMaxFileBytes) continue;
+          scanned++;
           final content = await e.readAsString();
           symbols.addAll(LanguageCompletions.extractSymbols(content, lang.id));
         } catch (_) {}
@@ -534,7 +543,24 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
     final ext = FileUtils.extOf(path);
     final lang = LanguageRegistry.instance.forExtension(ext);
-    final mode = widget.forceHex ? EditorViewMode.hex : _detectMode(ext);
+
+    // Taille et nature du fichier AVANT de le lire : un fichier trop gros
+    // ou binaire ne doit jamais être chargé en entier comme texte.
+    final FileProbe probe;
+    try {
+      probe = await FileProbe.of(path);
+    } on FileSystemException catch (e) {
+      _showErr('Lecture impossible : ${e.message}');
+      return;
+    }
+    final decision = EditorOpenPolicy.decide(probe, _detectMode(ext),
+        forceHex: widget.forceHex);
+    if (decision.block != null &&
+        !await _confirmHexPreview(path, probe, decision.block!)) {
+      return;
+    }
+    final mode = decision.mode;
+    if (decision.notice != null) _snack(decision.notice!);
 
     _UTab tab;
     if (mode == EditorViewMode.hex) {
@@ -571,6 +597,42 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     if (mounted) {
       context.read<SettingsService>().addRecentFile(path);
     }
+  }
+
+  /// Fichier non affichable en texte : propose l'aperçu hexadécimal.
+  Future<bool> _confirmHexPreview(
+      String path, FileProbe probe, TextBlock block) async {
+    if (!mounted) return false;
+    final why = switch (block) {
+      TextBlock.tooLarge =>
+        '« ${p.basename(path)} » fait ${FileUtils.formatSize(probe.size)} : '
+            'trop pour l\'éditeur de texte (limite : '
+            '${FileUtils.formatSize(EditorLimits.textMaxBytes)}).',
+      TextBlock.longLines =>
+        '« ${p.basename(path)} » contient une ligne de plus de '
+            '${EditorLimits.maxLineBytes ~/ 1024} Kio (fichier minifié ?) : '
+            'l\'afficher en texte figerait l\'application.',
+    };
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dCtx) => AlertDialog(
+        title: const Text('Fichier volumineux'),
+        content: Text(
+            '$why\n\n'
+            'L\'ouvrir en hexadécimal ? Au-delà de '
+            '${FileUtils.formatSize(HexFileIO.maxLoadedBytes)}, seul le début '
+            'est affiché, en lecture seule.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dCtx, false),
+              child: const Text('Annuler')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dCtx, true),
+              child: const Text('Hexadécimal')),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   EditorViewMode _detectMode(String ext) {
@@ -743,6 +805,26 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     if (tab == null || tab.viewMode == mode) return;
     final fromHex = tab.viewMode == EditorViewMode.hex;
     final toHex = mode == EditorViewMode.hex;
+
+    // Nature du fichier sur le disque : les limites de l'ouverture valent
+    // aussi ici. Entre modes texte, le disque n'est pas nécessaire (fichier
+    // supprimé ailleurs) : on se rabat sur le texte en mémoire.
+    FileProbe probe;
+    try {
+      probe = await FileProbe.of(tab.path);
+    } on FileSystemException catch (e) {
+      if (fromHex || toHex) {
+        _showErr('Lecture impossible : ${e.message}');
+        return;
+      }
+      probe = FileProbe.ofText(tab.content);
+    }
+    if (!mounted) return;
+    final refused = EditorOpenPolicy.refuseSwitch(probe, mode);
+    if (refused != null) {
+      _showErr(refused);
+      return;
+    }
 
     if (!fromHex && !toHex) {
       final cur = switch (tab.viewMode) {
@@ -1462,6 +1544,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       case 'jpeg':
       case 'gif':
         return Icons.image_outlined;
+      case 'xml':
       case 'json':
       case 'yaml':
       case 'yml':

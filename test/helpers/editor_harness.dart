@@ -44,12 +44,15 @@ Future<void> settleIo(
   }
 }
 
-/// Ouvre [path] dans l'éditeur et attend la fin de la lecture disque.
+/// Ouvre [path] dans l'éditeur et attend la fin de la lecture disque : par
+/// défaut, qu'un onglet soit actif ; sinon, que [until] soit vrai (ex. un
+/// dialogue affiché).
 Future<void> openEditor(
   WidgetTester tester,
   UnifiedEditorProvider editor,
   String path, {
   bool forceHex = false,
+  bool Function()? until,
 }) async {
   final settings = SettingsService();
   await tester.runAsync(() async {
@@ -64,16 +67,18 @@ Future<void> openEditor(
       ),
     ));
   });
-  await settleIo(tester, until: () => activeTab(editor) != null);
+  await settleIo(tester, until: until ?? () => activeTab(editor) != null);
 }
 
-/// Choisit [label] dans le menu « Mode d'interprétation ».
-Future<void> switchMode(WidgetTester tester, String label) async {
+/// Choisit [label] dans le menu « Mode d'interprétation », puis attend que
+/// [until] soit vrai (lecture disque terminée) ou un nombre fixe de tours.
+Future<void> switchMode(WidgetTester tester, String label,
+    {bool Function()? until}) async {
   await tester.tap(find.byIcon(Icons.swap_horiz_rounded));
   await tester.pumpAndSettle();
   await tester.tap(find.text(label).last);
   await tester.pumpAndSettle();
-  await settleIo(tester);
+  await settleIo(tester, until: until);
 }
 
 /// Onglet actif. C'est une classe privée de l'écran : accès dynamique pour
