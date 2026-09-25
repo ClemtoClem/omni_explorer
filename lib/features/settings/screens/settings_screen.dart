@@ -6,6 +6,7 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
@@ -14,6 +15,7 @@ import '../../../core/services/permissions_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
 import '../../../core/widgets/file_op_dialogs.dart';
+import '../../text_editor/services/ssh_known_hosts.dart';
 import 'font_settings_screen.dart';
 import 'theme_picker_screen.dart';
 
@@ -254,6 +256,21 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
           actions: [
+            // Serveur réinstallé : sa nouvelle clé serait refusée tant que
+            // l'ancienne est mémorisée.
+            TextButton(
+              onPressed: () async {
+                final host = hostCtrl.text.trim();
+                final port = int.tryParse(portCtrl.text.trim()) ?? 2222;
+                final messenger = ScaffoldMessenger.of(ctx);
+                await SshKnownHosts(await SharedPreferences.getInstance())
+                    .forget(host, port);
+                messenger.showSnackBar(SnackBar(
+                    content: Text('Clé de $host:$port oubliée : elle sera '
+                        'redemandée à la prochaine connexion.')));
+              },
+              child: const Text('Oublier la clé du serveur'),
+            ),
             TextButton(
               onPressed: () => Navigator.pop(ctx),
               child: const Text('Annuler'),

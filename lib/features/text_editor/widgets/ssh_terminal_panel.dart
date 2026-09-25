@@ -10,9 +10,12 @@ import 'dart:typed_data';
 
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../../app/theme/app_theme.dart';
+import '../services/ssh_known_hosts.dart';
+import 'ssh_host_key_dialog.dart';
 import 'terminal_keys_bar.dart';
 
 // ── Thème terminal (Catppuccin Mocha) ─────────────────────────────────────────
@@ -109,10 +112,21 @@ class _SshTerminalPanelState extends State<SshTerminalPanel> {
         timeout: const Duration(seconds: 8),
       );
 
+      final knownHosts = SshKnownHosts(await SharedPreferences.getInstance());
       _client = SSHClient(
         socket,
         username: widget.username,
         onPasswordRequest: () => widget.password,
+        // Sans ce contrôle, dartssh2 accepte n'importe quelle clé d'hôte :
+        // un serveur intercalé serait accepté sans avertissement.
+        onVerifyHostKey: (type, fingerprint) => verifyHostKey(
+          context,
+          knownHosts,
+          host: widget.host,
+          port: widget.port,
+          type: type,
+          fingerprint: fingerprint,
+        ),
       );
 
       _shell = await _client!.shell(

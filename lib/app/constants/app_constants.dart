@@ -47,6 +47,8 @@ class AppConstants {
   static const String prefSshUsername     = 'ssh_username';
   static const String prefSshPassword     = 'ssh_password';
   static const String prefSshSharedPath   = 'ssh_shared_path';
+  /// Empreintes des clés d'hôte SSH acceptées (confiance à la 1re connexion).
+  static const String prefSshKnownHosts   = 'ssh_known_hosts';
 
   // ── Corbeille ─────────────────────────────────────────────────────────────
   static const String trashFolderName  = '.omni_trash';
