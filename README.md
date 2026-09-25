@@ -294,3 +294,67 @@ l'extraction venait d'échouer.
   confirmation : c'est la gestion des conflits, prévue en P0.3.
 - Les archives sont toujours chargées entièrement en mémoire : c'est le
   streaming, prévu en P2.
+
+### P0.2 : l'éditeur hexadécimal ne peut plus tronquer ni vider un fichier
+
+Branche : `p0/hex-truncation`
+
+**Problèmes (CRITIQUE)**
+- Au-delà de 32 Mo, seuls les 32 premiers Mo étaient chargés, mais la
+  sauvegarde réécrivait le fichier avec ce tampon partiel. Modifier un octet
+  d'une vidéo de 2 Go la réduisait à 32 Mo. Le fichier était de plus lu **en
+  entier** avant d'être coupé, ce qui saturait la mémoire sur les très gros
+  fichiers.
+- Défaut découvert pendant la tâche : **changer de représentation** (menu
+  « Mode d'interprétation ») pouvait détruire le fichier.
+  - Hex → Texte/Code : un onglet ouvert en hex n'a pas de texte en mémoire.
+    L'éditeur affichait donc un document vide ; taper quelque chose puis
+    sauvegarder remplaçait tout le fichier par ce texte.
+  - Texte → Hex : les octets n'étaient jamais chargés, la vue restait bloquée
+    sur un indicateur de chargement.
+- Après une sauvegarde hex, l'onglet restait marqué « modifié ».
+- Une erreur de lecture à l'ouverture laissait un onglet bloqué en
+  chargement.
+
+**Modifications**
+- Nouveau `lib/features/text_editor/services/hex_file_io.dart` :
+  - `load` lit au plus 32 Mio depuis le début du fichier
+    (`RandomAccessFile`), sans jamais charger le reste ;
+  - `save` applique l'invariant **« ne jamais écrire un tampon d'une autre
+    taille que le fichier d'origine »** ; il refuse aussi si le fichier a
+    changé de taille sur le disque depuis son ouverture (modifié par une
+    autre application).
+- Éditeur (`unified_editor_screen.dart`) :
+  - un fichier tronqué s'ouvre en **lecture seule**, avec un bandeau qui
+    l'explique (« Aperçu des 32 Mo premiers sur 2 Go… ») ; demander l'édition
+    est refusé avec un message ;
+  - vers ou depuis l'hexadécimal, le contenu est **relu depuis le disque** ;
+    le changement est refusé tant que des modifications ne sont pas
+    sauvegardées ; un fichier qui n'est pas de l'UTF-8 valide reste en hex,
+    avec un message clair ;
+  - après une sauvegarde hex, l'onglet n'est plus marqué « modifié » ;
+  - un onglet dont la lecture échoue n'est plus ouvert.
+
+**Validation**
+- `test/features/text_editor/hex_file_io_test.dart` (7 tests) : lecture
+  partielle, limite de 32 Mio (fichier creux), sauvegarde refusée pour un
+  tampon partiel (fichier laissé intact), refus si le fichier a changé sur
+  le disque.
+- `test/features/text_editor/unified_editor_hex_test.dart` (5 tests de widget
+  sur l'éditeur réel) : hex → texte montre le vrai contenu, fichier binaire
+  refusé, texte → hex charge les octets, changement refusé si non
+  sauvegardé, gros fichier en lecture seule.
+- Contrôle : avec l'ancien code de l'éditeur, les 5 tests de widget
+  échouent ; ils reproduisent donc bien les défauts corrigés.
+- `flutter test` : 45 tests réussis. `flutter analyze` : 0 erreur,
+  0 avertissement (12 remarques de style préexistantes).
+- `flutter build apk --debug` : réussi.
+
+**Limites et suite**
+- Les fichiers de plus de 32 Mo ne sont pas modifiables en hexadécimal :
+  l'éditeur paginé (lecture par blocs, insertion, suppression, annuler et
+  rétablir, recherche) est prévu en P2.
+- La sauvegarde hex écrit encore directement dans le fichier : l'écriture
+  atomique est prévue en P0.5.
+- Le contrôle « fichier modifié ailleurs » ne compare que la taille : une
+  modification externe de même taille n'est pas détectée.
