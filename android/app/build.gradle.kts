@@ -27,6 +27,18 @@ android {
         versionName = flutter.versionName
     }
 
+    packaging {
+        jniLibs {
+            // fvp (lecteur vidéo) et ffmpeg-kit (éditeur multimédia) embarquent
+            // chacun la runtime C++ du NDK : sans cette règle, mergeNativeLibs
+            // échoue (« 2 files found with path lib/<abi>/libc++_shared.so »).
+            // Une seule copie est gardée ; la runtime libc++ reste compatible
+            // entre versions du NDK, mais lecture vidéo et export FFmpeg sont
+            // à vérifier sur appareil après chaque mise à jour de ces paquets.
+            pickFirsts += "lib/**/libc++_shared.so"
+        }
+    }
+
     buildTypes {
         release {
             // Signing with the debug keys for now, so `flutter run --release` works.
