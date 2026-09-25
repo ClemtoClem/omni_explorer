@@ -295,7 +295,6 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
         color: AppColors.warning,
         title: 'Coffre-fort',
         subtitle: 'Mots de passe chiffrés',
-        badge: 'à venir',
         onTap: () => _open(AppFeature.passwordVault),
       ),
       FeatureCard(

@@ -22,6 +22,7 @@ import 'core/utils/system_ui.dart';
 import 'features/home/screens/feature_launcher_screen.dart';
 import 'features/text_editor/screens/unified_editor_screen.dart';
 import 'features/media_player/providers/media_player_provider.dart';
+import 'features/password_vault/providers/vault_session.dart';
 import 'features/video_editor/services/video_export_service.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,6 +95,9 @@ Future<void> main() async {
         ChangeNotifierProvider.value(value: appState),
         ChangeNotifierProvider(create: (_) => UnifiedEditorProvider()),
         ChangeNotifierProvider(create: (_) => MediaPlayerProvider()),
+        // Session du coffre-fort : créée à la première ouverture du coffre,
+        // puis conservée (le verrouillage automatique la protège).
+        ChangeNotifierProvider(create: (_) => VaultSession()),
       ],
       child: const OmniExplorerApp(),
     ),
