@@ -445,3 +445,104 @@ Branche : `p0/file-ops`
   ce code mort en P2.
 - Sur un stockage qui ne gère pas les liens symboliques (carte SD en
   exFAT), copier un lien échoue ; l'échec est rapporté dans le bilan.
+
+### P0.4 : corbeille fiable
+
+Branche : `p0/trash`
+
+**Problèmes**
+- **Restauration** : un dossier venant d'un autre stockage (carte SD) n'était
+  pas restauré, mais disparaissait quand même de la liste. Il devenait
+  orphelin et invisible. Restaurer écrasait sans avertissement un fichier
+  recréé entre-temps au même emplacement.
+- **Index des chemins d'origine** : écrit directement (non atomique), et
+  ignoré en silence s'il était illisible. Si l'application était tuée pendant
+  l'écriture, les chemins d'origine de *tous* les éléments étaient perdus :
+  les fichiers restaient dans la corbeille, invisibles, sans possibilité de
+  les restaurer ni de les supprimer.
+- **Mettre à la corbeille un dossier qui la contient** (par exemple
+  `Android/`, puisque la corbeille est dans `Android/data/…`) : le repli
+  « copie » copiait le dossier dans son propre descendant, sans fin.
+- **Repli « copie puis suppression »** : il se déclenchait pour n'importe
+  quel échec de déplacement, y compris « permission refusée ». On obtenait
+  une copie dans la corbeille, un original impossible à supprimer, puis un
+  orphelin.
+- **Interface** : mettre à la corbeille, restaurer, supprimer et vider
+  n'attendaient pas la fin de l'opération et n'affichaient jamais d'erreur.
+  Le succès était annoncé d'office. « Vider » dans la feuille de la corbeille
+  supprimait tout sans confirmation.
+
+**Modifications**
+- `TrashService`, réécrit en gardant la même API :
+  - l'index est écrit **avant** le déplacement et mis à jour **après** la
+    restauration : une interruption ne fait jamais perdre un chemin
+    d'origine ;
+  - l'index est écrit de façon atomique (nouveau
+    `lib/core/utils/atomic_write.dart`, réutilisé en P0.5) ; un index
+    illisible est mis de côté (`.corrupt-…`), jamais écrasé ;
+  - au chargement, l'index est **réconcilié** avec le contenu réel : les
+    entrées dont le fichier a disparu sont retirées, et les fichiers absents
+    de l'index sont listés comme « origine inconnue » (supprimables, non
+    restaurables automatiquement) ;
+  - `restore` ne remplace jamais un élément sans décision : même boîte de
+    conflit que l'explorateur, et sans choix, les deux sont gardés. En cas
+    d'échec, l'élément reste dans la corbeille. Le dossier parent est recréé
+    si besoin ;
+  - refus clair de mettre à la corbeille un élément absent, un élément déjà
+    dans la corbeille, ou un dossier qui la contient ;
+  - `moveAllToTrash` et `emptyTrash` renvoient un bilan par élément ; les
+    liens sont déplacés et supprimés en tant que liens.
+- `FileOperationsService` :
+  - nouvelle méthode publique `relocate` (déplacement ou copie vers un chemin
+    exact, avec conflits), utilisée par la corbeille ;
+  - le repli « copie puis suppression » n'a lieu **que** lors d'un changement
+    de stockage (`EXDEV`) ; toute autre erreur est remontée sans rien
+    copier ;
+  - si l'original ne peut pas être supprimé après une copie complète,
+    `PartialMoveException` le signale et **la copie est conservée** :
+    l'original a pu être partiellement supprimé, la copie est alors le seul
+    exemplaire complet.
+- Interface :
+  - le menu contextuel, la sélection et les paramètres attendent la fin de
+    l'opération et affichent le bilan ou l'erreur ;
+  - dans la feuille de la corbeille, les échecs s'affichent dans une boîte
+    de dialogue (un message éphémère resterait caché derrière la feuille) ;
+    une restauration sous un autre nom est signalée ; « Vider » demande
+    confirmation ;
+  - chaque élément affiche son dossier d'origine.
+
+**Validation**
+- 22 nouveaux tests :
+  - `test/core/services/trash_service_test.dart` (20 tests, sur de vrais
+    dossiers) : restauration de fichiers et de dossiers, parent recréé,
+    aucun écrasement, conflits ignorer et remplacer, échecs (permissions)
+    qui laissent l'élément en place, liens, refus (corbeille dans le
+    dossier, élément déjà à la corbeille), redémarrage, entrées fantômes,
+    orphelins, index corrompu mis de côté, écriture atomique ;
+  - 2 tests ajoutés au service : « permission refusée » ne copie rien, et
+    un **vrai déplacement entre deux systèmes de fichiers** (le disque et le
+    tmpfs `/dev/shm`). Ce test est ignoré automatiquement si aucun second
+    système de fichiers n'est disponible.
+- Tests de mutation : rétablir le repli « copie » pour toute erreur, faire
+  remplacer systématiquement lors d'une restauration, ou désactiver la
+  réconciliation des orphelins : chacun de ces sabotages fait échouer des
+  tests.
+- `flutter test` : 115 tests réussis. `flutter analyze` : 0 erreur,
+  0 avertissement (12 remarques de style préexistantes).
+- `flutter build apk --debug` : réussi.
+
+**Limites et suite**
+- La corbeille est dans le dossier privé de l'application sur le stockage
+  interne (`Android/data/…`) :
+  - **désinstaller l'application vide la corbeille** ;
+  - mettre à la corbeille un élément d'une carte SD le copie sur le
+    stockage interne (lent pour les gros dossiers).
+
+  Une corbeille par stockage serait préférable ; à décider avec l'audit
+  Android (P2).
+- La taille affichée d'un dossier mis à la corbeille est 0 (le calcul
+  récursif n'est pas fait).
+- Les dialogues de la corbeille ne sont pas couverts par des tests de widget
+  (la logique l'est par les tests du service).
+- Les éléments orphelins ne peuvent pas être restaurés vers un dossier
+  choisi.
