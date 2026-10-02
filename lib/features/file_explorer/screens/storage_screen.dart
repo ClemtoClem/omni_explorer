@@ -11,15 +11,18 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
+import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
+import '../../../core/models/file_filter.dart';
 import '../../../core/models/file_item.dart';
 import '../../../core/services/file_service.dart';
 import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
 import '../../../core/utils/storage_stats.dart';
 import '../../file_explorer/screens/file_explorer_screen.dart';
+import '../../home/screens/recent_files_screen.dart';
+import 'trash_screen.dart';
 import '../widgets/shortcut_editor_dialog.dart';
-import '../widgets/trash_sheet.dart';
 
 // ── Carte Corbeille ──────────────────────────────────────────────────────────
 
@@ -96,17 +99,13 @@ class StorageScreen extends StatefulWidget {
 }
 
 class _StorageEntry {
-  final String path;
-  final String label;
-  final bool isExternal;
+  final StorageInfo info;
   final StorageStats stats;
 
-  const _StorageEntry({
-    required this.path,
-    required this.label,
-    required this.isExternal,
-    required this.stats,
-  });
+  const _StorageEntry({required this.info, required this.stats});
+
+  String get path => info.path;
+  String get label => info.label;
 }
 
 class _StorageScreenState extends State<StorageScreen> {
@@ -122,16 +121,15 @@ class _StorageScreenState extends State<StorageScreen> {
   Future<void> _load() async {
     if (mounted) setState(() => _loading = true);
     final list = await FileService.instance.getAvailableStorages();
-    final entries = <_StorageEntry>[];
-    for (final s in list) {
-      final stats = await getStorageStats(s.path);
-      entries.add(_StorageEntry(
-        path: s.path,
-        label: s.label,
-        isExternal: s.isExternal,
-        stats: stats,
-      ));
-    }
+    // En parallèle, et borné : un partage réseau injoignable peut bloquer
+    // `df` longtemps.
+    final entries = await Future.wait([
+      for (final s in list)
+        getStorageStats(s.path)
+            .timeout(const Duration(seconds: 3),
+                onTimeout: () => StorageStats.empty)
+            .then((stats) => _StorageEntry(info: s, stats: stats)),
+    ]);
     if (!mounted) return;
     final settings = context.read<SettingsService>();
     if (entries.isNotEmpty && settings.needsDefaultShortcuts) {
@@ -145,11 +143,23 @@ class _StorageScreenState extends State<StorageScreen> {
     });
   }
 
-  void _openExplorer(String path) {
+  void _openExplorer(String path, {FileFilter? filter}) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => FileExplorerScreen(initialPath: path)),
+      MaterialPageRoute(
+          builder: (_) =>
+              FileExplorerScreen(initialPath: path, initialFilter: filter)),
     );
+  }
+
+  void _openRecentFiles() {
+    Navigator.push(
+        context, MaterialPageRoute(builder: (_) => const RecentFilesScreen()));
+  }
+
+  void _openTrash() {
+    Navigator.push(
+        context, MaterialPageRoute(builder: (_) => const TrashScreen()));
   }
 
   // ── Raccourcis ─────────────────────────────────────────────────────────────
@@ -166,7 +176,8 @@ class _StorageScreenState extends State<StorageScreen> {
     }
     // Anciens favoris pointant sur un fichier : ouvrir son dossier.
     _openExplorer(
-        type == FileSystemEntityType.directory ? s.path : p.dirname(s.path));
+        type == FileSystemEntityType.directory ? s.path : p.dirname(s.path),
+        filter: s.filter);
   }
 
   Future<void> _addShortcut() async {
@@ -178,6 +189,7 @@ class _StorageScreenState extends State<StorageScreen> {
           draft.path,
           iconName: draft.iconName,
           colorValue: draft.colorValue,
+          filter: draft.filter,
         );
     if (!added) _snack('Ce répertoire a déjà un raccourci');
   }
@@ -190,6 +202,7 @@ class _StorageScreenState extends State<StorageScreen> {
           path: draft.path,
           iconName: draft.iconName,
           colorValue: draft.colorValue,
+          filter: draft.filter,
         ));
     if (!ok) _snack('Un autre raccourci pointe déjà sur ce répertoire');
   }
@@ -205,7 +218,7 @@ class _StorageScreenState extends State<StorageScreen> {
         label: 'Annuler',
         onPressed: () async {
           await settings.addShortcut(s.name, s.path,
-              iconName: s.iconName, colorValue: s.colorValue);
+              iconName: s.iconName, colorValue: s.colorValue, filter: s.filter);
           // Remettre le raccourci à sa place d'origine.
           final back = settings.shortcuts.last;
           await settings.moveShortcut(
@@ -229,8 +242,12 @@ class _StorageScreenState extends State<StorageScreen> {
             ListTile(
               leading: Icon(shortcutIconOf(s), color: shortcutColorOf(s)),
               title: Text(s.name),
-              subtitle:
-                  Text(s.path, maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                  s.filter.isEmpty
+                      ? s.path
+                      : '${s.path}\nFiltres : ${s.filter.describe()}',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis),
             ),
             const Divider(height: 1),
             ListTile(
@@ -284,6 +301,18 @@ class _StorageScreenState extends State<StorageScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Stockage'),
+        actions: [
+          IconButton(
+            tooltip: 'Fichiers récents',
+            icon: const Icon(Icons.history_rounded),
+            onPressed: _openRecentFiles,
+          ),
+          IconButton(
+            tooltip: 'Actualiser les supports',
+            icon: const Icon(Icons.refresh_rounded),
+            onPressed: _loading ? null : _load,
+          ),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -358,7 +387,7 @@ class _StorageScreenState extends State<StorageScreen> {
         Consumer<TrashService>(
           builder: (context, trash, _) => _TrashCard(
             trash: trash,
-            onOpen: () => showTrashSheet(context),
+            onOpen: _openTrash,
           ),
         ),
       ],
@@ -369,7 +398,8 @@ class _StorageScreenState extends State<StorageScreen> {
   /// réellement présents sur la machine. Ensuite, l'utilisateur les gère.
   List<ShortcutItem> _defaultShortcuts(String root) {
     ShortcutItem? first(
-        List<String> paths, String name, String icon, Color color) {
+        List<String> paths, String name, String icon, Color color,
+        [FileFilter filter = FileFilter.none]) {
       for (final path in paths) {
         if (Directory(path).existsSync()) {
           return ShortcutItem(
@@ -378,6 +408,7 @@ class _StorageScreenState extends State<StorageScreen> {
             path: path,
             iconName: icon,
             colorValue: color.toARGB32(),
+            filter: filter,
           );
         }
       }
@@ -394,14 +425,38 @@ class _StorageScreenState extends State<StorageScreen> {
         'Images',
         'image',
         AppColors.colorImage,
+        // Les photos sont rangées par appareil / application : on cherche
+        // dans les sous-dossiers, les plus récentes d'abord.
+        const FileFilter(
+          categories: {FileCategory.image},
+          recursive: true,
+          sortMode: SortMode.date,
+          sortAscending: false,
+        ),
       ),
-      first([p.join(root, 'Movies'), p.join(root, 'Videos')], 'Vidéos', 'video',
-          AppColors.colorVideo),
+      first(
+          [p.join(root, 'Movies'), p.join(root, 'Videos')],
+          'Vidéos',
+          'video',
+          AppColors.colorVideo,
+          const FileFilter(
+              categories: {FileCategory.folder, FileCategory.video})),
       first([p.join(root, 'Documents')], 'Documents', 'document',
           AppColors.colorDoc),
-      first([p.join(root, 'Music')], 'Musique', 'music', AppColors.colorAudio),
-      first([p.join(root, 'Download'), p.join(root, 'Downloads')],
-          'Téléchargements', 'download', AppColors.colorDoc),
+      first(
+          [p.join(root, 'Music')],
+          'Musique',
+          'music',
+          AppColors.colorAudio,
+          const FileFilter(
+              categories: {FileCategory.folder, FileCategory.audio})),
+      first(
+          [p.join(root, 'Download'), p.join(root, 'Downloads')],
+          'Téléchargements',
+          'download',
+          AppColors.colorDoc,
+          // Le dernier téléchargement en premier.
+          const FileFilter(sortMode: SortMode.date, sortAscending: false)),
       if (Platform.isAndroid)
         first(['/system/app', '/system/priv-app'], 'Apps', 'apps',
             AppColors.info),
@@ -507,6 +562,28 @@ class _RingCard extends StatelessWidget {
 
 // ── Carte d'un espace de stockage ────────────────────────────────────────────
 
+IconData _kindIcon(StorageKind kind) => switch (kind) {
+      StorageKind.internal => Icons.smartphone_rounded,
+      StorageKind.home => Icons.home_rounded,
+      StorageKind.system => Icons.computer_rounded,
+      StorageKind.disk => Icons.storage_rounded,
+      StorageKind.sdCard => Icons.sd_card_rounded,
+      StorageKind.usb => Icons.usb_rounded,
+      StorageKind.network => Icons.lan_rounded,
+      StorageKind.optical => Icons.album_rounded,
+    };
+
+String _kindLabel(StorageKind kind) => switch (kind) {
+      StorageKind.internal => 'Stockage interne',
+      StorageKind.home => 'Dossier personnel',
+      StorageKind.system => 'Système',
+      StorageKind.disk => 'Disque',
+      StorageKind.sdCard => 'Carte SD',
+      StorageKind.usb => 'USB',
+      StorageKind.network => 'Réseau',
+      StorageKind.optical => 'Disque optique',
+    };
+
 class _StorageCard extends StatelessWidget {
   final _StorageEntry entry;
   final VoidCallback onExplore;
@@ -539,17 +616,30 @@ class _StorageCard extends StatelessWidget {
                   color: accent.withValues(alpha: 0.18),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Icon(
-                  entry.isExternal
-                      ? Icons.sd_card_rounded
-                      : Icons.storage_rounded,
-                  color: accent,
-                  size: 20,
-                ),
+                child:
+                    Icon(_kindIcon(entry.info.kind), color: accent, size: 20),
               ),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(entry.label, style: theme.textTheme.titleMedium),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(entry.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.titleMedium),
+                    Text(
+                      [
+                        _kindLabel(entry.info.kind),
+                        if (entry.info.readOnly) 'lecture seule',
+                        entry.path,
+                      ].join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
@@ -632,6 +722,7 @@ class _ShortcutGrid extends StatelessWidget {
               color: shortcutColorOf(s),
               missing: !FileSystemEntity.isDirectorySync(s.path) &&
                   !File(s.path).existsSync(),
+              filtered: !s.filter.isEmpty,
               onTap: () => onOpen(s),
               onLongPress: () => onActions(s),
             );
@@ -647,6 +738,9 @@ class _ShortcutTile extends StatelessWidget {
   final IconData icon;
   final Color color;
   final bool missing;
+
+  /// Le raccourci applique des filtres (pastille sur l'icône).
+  final bool filtered;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
 
@@ -657,6 +751,7 @@ class _ShortcutTile extends StatelessWidget {
     required this.color,
     required this.onTap,
     this.missing = false,
+    this.filtered = false,
     this.onLongPress,
   });
 
@@ -687,8 +782,14 @@ class _ShortcutTile extends StatelessWidget {
                     color: color.withValues(alpha: 0.20),
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Icon(missing ? Icons.folder_off_rounded : icon,
-                      color: color, size: 22),
+                  child: Badge(
+                    isLabelVisible: filtered && !missing,
+                    backgroundColor: color,
+                    label: const Icon(Icons.filter_alt_rounded,
+                        size: 10, color: Colors.white),
+                    child: Icon(missing ? Icons.folder_off_rounded : icon,
+                        color: color, size: 22),
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Text(

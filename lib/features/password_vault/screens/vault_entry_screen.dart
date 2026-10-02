@@ -13,7 +13,15 @@ import '../widgets/password_generator_sheet.dart';
 class VaultEntryScreen extends StatefulWidget {
   /// Entrée à modifier ; `null` pour en créer une.
   final VaultEntry? entry;
-  const VaultEntryScreen({super.key, this.entry});
+
+  /// Catégorie d'une nouvelle entrée (ignorée en modification).
+  final VaultCategory category;
+
+  const VaultEntryScreen({
+    super.key,
+    this.entry,
+    this.category = VaultCategory.website,
+  });
 
   @override
   State<VaultEntryScreen> createState() => _VaultEntryScreenState();
@@ -21,11 +29,14 @@ class VaultEntryScreen extends StatefulWidget {
 
 class _VaultEntryScreenState extends State<VaultEntryScreen> {
   late final _title = TextEditingController(text: widget.entry?.title);
-  late final _username = TextEditingController(text: widget.entry?.username);
-  late final _password = TextEditingController(text: widget.entry?.password);
-  late final _url = TextEditingController(text: widget.entry?.url);
-  late final _notes = TextEditingController(text: widget.entry?.notes);
-  bool _showPassword = false;
+  late VaultCategory _category = widget.entry?.category ?? widget.category;
+
+  /// Un contrôleur par clé de champ, créé à la demande : changer de
+  /// catégorie garde les valeurs des clés communes (mot de passe, notes…).
+  final Map<String, TextEditingController> _fields = {};
+
+  /// Champs secrets affichés en clair.
+  final Set<String> _revealed = {};
   bool _dirty = false;
   bool _closing = false;
   String? _titleError;
@@ -35,10 +46,14 @@ class _VaultEntryScreenState extends State<VaultEntryScreen> {
   @override
   void initState() {
     super.initState();
-    for (final c in [_title, _username, _password, _url, _notes]) {
-      c.addListener(_markDirty);
-    }
+    _title.addListener(_markDirty);
   }
+
+  TextEditingController _ctrl(String key) => _fields.putIfAbsent(key, () {
+        final c = TextEditingController(text: widget.entry?[key] ?? '');
+        c.addListener(_markDirty);
+        return c;
+      });
 
   void _markDirty() {
     if (!_dirty) setState(() => _dirty = true);
@@ -46,7 +61,8 @@ class _VaultEntryScreenState extends State<VaultEntryScreen> {
 
   @override
   void dispose() {
-    for (final c in [_title, _username, _password, _url, _notes]) {
+    _title.dispose();
+    for (final c in _fields.values) {
       c.dispose();
     }
     super.dispose();
@@ -54,28 +70,38 @@ class _VaultEntryScreenState extends State<VaultEntryScreen> {
 
   VaultSession get _session => context.read<VaultSession>();
 
+  /// Valeurs à enregistrer : champs de la catégorie choisie. Les champs
+  /// inconnus de cette version (coffre plus récent) sont conservés tant que
+  /// la catégorie ne change pas.
+  Map<String, String> _values() {
+    final original = widget.entry;
+    return {
+      if (original != null && original.categoryKey == _category.key)
+        for (final e in original.fields.entries)
+          if (_category.field(e.key) == null) e.key: e.value,
+      for (final f in _category.fields)
+        f.key: f.kind == VaultFieldKind.url || f.kind == VaultFieldKind.email
+            ? _ctrl(f.key).text.trim()
+            : _ctrl(f.key).text,
+    };
+  }
+
   Future<void> _save() async {
     final title = _title.text.trim();
     if (title.isEmpty) {
-      setState(() => _titleError = 'Le titre est obligatoire.');
+      setState(() => _titleError = 'Le tag est obligatoire.');
       return;
     }
     try {
       if (_isNew) {
         await _session.addEntry(
-          title: title,
-          username: _username.text,
-          password: _password.text,
-          url: _url.text.trim(),
-          notes: _notes.text,
-        );
+            title: title, category: _category, fields: _values());
       } else {
-        await _session.updateEntry(widget.entry!.copyWith(
+        final original = widget.entry!;
+        await _session.updateEntry(original.copyWith(
           title: title,
-          username: _username.text,
-          password: _password.text,
-          url: _url.text.trim(),
-          notes: _notes.text,
+          category: original.categoryKey == _category.key ? null : _category,
+          fields: _values(),
         ));
       }
       if (mounted) Navigator.pop(context);
@@ -111,11 +137,11 @@ class _VaultEntryScreenState extends State<VaultEntryScreen> {
     }
   }
 
-  Future<void> _generate() async {
+  Future<void> _generate(String key) async {
     final generated = await showPasswordGeneratorSheet(context);
     if (generated != null) {
-      _password.text = generated;
-      setState(() => _showPassword = true);
+      _ctrl(key).text = generated;
+      setState(() => _revealed.add(key));
     }
   }
 
@@ -180,7 +206,9 @@ class _VaultEntryScreenState extends State<VaultEntryScreen> {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(_isNew ? 'Nouvelle entrée' : 'Modifier'),
+          title: Text(_isNew
+              ? 'Nouvelle entrée · ${_category.label}'
+              : 'Modifier · ${_category.label}'),
           actions: [
             if (!_isNew)
               IconButton(
@@ -198,82 +226,106 @@ class _VaultEntryScreenState extends State<VaultEntryScreen> {
         body: ListView(
           padding: const EdgeInsets.all(16),
           children: [
+            DropdownButtonFormField<VaultCategory>(
+              key: const Key('entry-category'),
+              initialValue: _category,
+              decoration: const InputDecoration(labelText: 'Catégorie'),
+              items: [
+                for (final c in VaultCategory.values)
+                  DropdownMenuItem(
+                    value: c,
+                    child: Row(
+                      children: [
+                        Icon(c.icon, color: c.color, size: 20),
+                        const SizedBox(width: 12),
+                        Text(c.label),
+                      ],
+                    ),
+                  ),
+              ],
+              onChanged: (c) {
+                if (c == null || c == _category) return;
+                setState(() {
+                  _category = c;
+                  _dirty = true;
+                });
+              },
+            ),
+            const SizedBox(height: 12),
             TextField(
               key: const Key('entry-title'),
               controller: _title,
-              decoration:
-                  InputDecoration(labelText: 'Titre *', errorText: _titleError),
+              decoration: InputDecoration(
+                labelText: 'Tag *',
+                helperText: 'Nom de l\'entrée, utilisé pour le tri',
+                errorText: _titleError,
+              ),
               textInputAction: TextInputAction.next,
               onChanged: (_) {
                 if (_titleError != null) setState(() => _titleError = null);
               },
             ),
-            const SizedBox(height: 12),
-            TextField(
-              key: const Key('entry-username'),
-              controller: _username,
-              decoration: InputDecoration(
-                labelText: 'Identifiant',
-                suffixIcon: IconButton(
-                  tooltip: 'Copier l\'identifiant',
-                  icon: const Icon(Icons.copy_rounded),
-                  onPressed: () => _copy(_username.text, 'Identifiant'),
-                ),
+            for (final f in _category.fields) ...[
+              const SizedBox(height: 12),
+              _fieldInput(f),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _fieldInput(VaultField f) {
+    final ctrl = _ctrl(f.key);
+    final hidden = f.isSecret && !_revealed.contains(f.key);
+    // Un champ masqué tient sur une ligne (contrainte de Flutter) ; affiché,
+    // un champ long retrouve sa hauteur.
+    final multiline = f.isMultiline && !hidden;
+    return TextField(
+      key: Key('field-${f.key}'),
+      controller: ctrl,
+      obscureText: hidden,
+      minLines: multiline ? 3 : 1,
+      maxLines: multiline ? 8 : 1,
+      autocorrect: false,
+      enableSuggestions: !f.isSecret && f.kind == VaultFieldKind.multiline,
+      enableIMEPersonalizedLearning: false,
+      keyboardType: switch (f.kind) {
+        VaultFieldKind.email => TextInputType.emailAddress,
+        VaultFieldKind.url => TextInputType.url,
+        VaultFieldKind.pin => TextInputType.number,
+        _ when multiline => TextInputType.multiline,
+        _ => TextInputType.text,
+      },
+      textInputAction:
+          multiline ? TextInputAction.newline : TextInputAction.next,
+      decoration: InputDecoration(
+        labelText: f.label,
+        helperText: f.hint,
+        suffixIcon: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (f.isSecret)
+              IconButton(
+                tooltip: hidden ? 'Afficher' : 'Masquer',
+                icon: Icon(hidden
+                    ? Icons.visibility_rounded
+                    : Icons.visibility_off_rounded),
+                onPressed: () => setState(() =>
+                    hidden ? _revealed.add(f.key) : _revealed.remove(f.key)),
               ),
-              autocorrect: false,
-              enableSuggestions: false,
-              textInputAction: TextInputAction.next,
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              key: const Key('entry-password'),
-              controller: _password,
-              obscureText: !_showPassword,
-              autocorrect: false,
-              enableSuggestions: false,
-              enableIMEPersonalizedLearning: false,
-              decoration: InputDecoration(
-                labelText: 'Mot de passe',
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      tooltip: _showPassword ? 'Masquer' : 'Afficher',
-                      icon: Icon(_showPassword
-                          ? Icons.visibility_off_rounded
-                          : Icons.visibility_rounded),
-                      onPressed: () =>
-                          setState(() => _showPassword = !_showPassword),
-                    ),
-                    IconButton(
-                      tooltip: 'Générer',
-                      icon: const Icon(Icons.casino_rounded),
-                      onPressed: _generate,
-                    ),
-                    IconButton(
-                      tooltip: 'Copier le mot de passe',
-                      icon: const Icon(Icons.copy_rounded),
-                      onPressed: () => _copy(_password.text, 'Mot de passe'),
-                    ),
-                  ],
-                ),
+            if (f.kind == VaultFieldKind.password)
+              IconButton(
+                tooltip: 'Générer',
+                icon: const Icon(Icons.casino_rounded),
+                onPressed: () => _generate(f.key),
               ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _url,
-              decoration: const InputDecoration(labelText: 'Adresse (URL)'),
-              keyboardType: TextInputType.url,
-              autocorrect: false,
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _notes,
-              decoration: const InputDecoration(labelText: 'Notes'),
-              minLines: 3,
-              maxLines: 8,
-              enableIMEPersonalizedLearning: false,
-            ),
+            if (f.key != 'notes')
+              IconButton(
+                tooltip: 'Copier : ${f.label}',
+                icon: const Icon(Icons.copy_rounded),
+                onPressed: () => _copy(ctrl.text, f.label),
+              ),
           ],
         ),
       ),

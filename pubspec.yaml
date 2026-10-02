@@ -86,7 +86,6 @@ dependencies:
   share_plus: ^10.1.4
   url_launcher: ^6.3.0
   go_router: ^17.1.0
-  external_path: ^2.2.0
   flutter_highlight: ^0.7.0
   cupertino_icons: ^1.0.9
   camera: ^0.12.0+1

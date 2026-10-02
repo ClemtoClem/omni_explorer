@@ -38,7 +38,7 @@ void main() {
       VaultEntry(
           id: id,
           title: title,
-          password: password,
+          fields: {'password': password},
           createdAt: now,
           updatedAt: now);
 
@@ -145,15 +145,15 @@ void main() {
       final source = session('src');
       await source.ensureInitialized();
       await source.create('mot de passe A');
-      await source.addEntry(title: 'Banque', password: 'x');
-      await source.addEntry(title: 'Mail', password: 'y');
+      await source.addEntry(title: 'Banque', fields: {'password': 'x'});
+      await source.addEntry(title: 'Mail', fields: {'password': 'y'});
       final bytes = await source.exportPackage('mot de passe A');
       source.dispose();
 
       final target = session('dst');
       await target.ensureInitialized();
       await target.create('mot de passe B');
-      await target.addEntry(title: 'Mail', password: 'autre');
+      await target.addEntry(title: 'Mail', fields: {'password': 'autre'});
 
       final plan = await target.previewImport(bytes, 'mot de passe A');
       expect(plan.added.single.title, 'Banque');

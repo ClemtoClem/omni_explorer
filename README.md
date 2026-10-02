@@ -1265,3 +1265,85 @@ création.
 - À l'ouverture, l'explorateur affiche brièvement « Répertoire vide » avant
   le premier chargement (défaut préexistant, visible aussi dans le
   sélecteur).
+
+### Coffre-fort : catégories d'informations et tri
+
+**Problème**
+- Le coffre ne savait enregistrer qu'un seul type d'information :
+  identifiant, mot de passe, adresse et notes.
+- La liste était toujours triée par titre, de A à Z.
+
+**Modifications**
+- Catégories (`models/vault_category.dart`). Chaque entrée a un **tag**
+  (son nom, obligatoire, clé de tri) et les champs de sa catégorie :
+
+  | Catégorie | Champs (en plus des notes) |
+  |---|---|
+  | Site web | identifiant, mot de passe, adresse (URL) |
+  | Messagerie | adresse e-mail, mot de passe, serveur |
+  | Message secret | message |
+  | Banque | nom de la banque, titulaire de la carte, numéro de carte complet, date d'expiration, cryptogramme, code PIN, IBAN, BIC, RIB, identifiant et code d'accès en ligne |
+  | Réseau Wi-Fi | nom du réseau, mot de passe, sécurité |
+  | Serveur / SSH | hôte, port, utilisateur, mot de passe, clé privée |
+  | Pièce d'identité | type, nom complet, numéro, dates de délivrance et d'expiration, autorité |
+  | Santé | numéro de sécurité sociale, mutuelle, numéro d'adhérent, groupe sanguin |
+  | Téléphone / SIM | numéro, opérateur, PIN, PUK, code de déverrouillage |
+  | Licence logicielle | logiciel, clé, titulaire, e-mail du compte |
+  | Portefeuille crypto | portefeuille, adresse publique, phrase de récupération, mot de passe |
+
+  Chaque champ a une nature : texte, e-mail, URL, secret, mot de passe
+  (avec le générateur), code, texte long, texte long secret. Les champs
+  secrets sont masqués à la saisie (bouton afficher / masquer) et exclus de
+  la recherche. Tous les champs sauf les notes sont copiables, avec
+  effacement automatique du presse-papiers.
+- Formulaire (`vault_entry_screen.dart`) : la catégorie se choisit à
+  l'ajout (liste des catégories avec leurs champs) et peut être changée
+  ensuite. Les valeurs des champs de même clé sont gardées (mot de passe,
+  notes…). Les champs d'une catégorie inconnue de cette version (coffre
+  écrit par une version plus récente) sont conservés.
+- Liste : icône et couleur de la catégorie, sous-titre « catégorie · champ
+  résumé » (identifiant, adresse e-mail, banque, réseau…), copie rapide du
+  résumé et du secret principal. Menu **Trier** : tag de A à Z, tag de Z à
+  A, ou catégorie. Le tri par catégorie regroupe les entrées sous un
+  en-tête par catégorie (catégories et tags de A à Z). La comparaison
+  ignore la casse et les accents (« Écran » se range avec les « e »). Le
+  tri choisi est retenu dans les préférences (il ne révèle rien du
+  contenu).
+- Schéma du contenu 1 → 2 (`VaultContent`) : entrées
+  `{id, title, category, fields, createdAt, updatedAt}`. Une migration
+  transforme les entrées du schéma 1 en « Site web », à l'ouverture d'un
+  ancien coffre comme à l'import d'un ancien export. Une version antérieure
+  de l'application refuse un coffre du schéma 2 (« coffre trop récent »)
+  au lieu de l'abîmer.
+- Fusion à l'import : deux entrées se correspondent si elles ont la même
+  catégorie, le même tag et le même champ résumé (et la même adresse pour
+  un site web). Le contenu est comparé champ par champ.
+
+**Validation**
+- 18 nouveaux tests :
+  - modèle (5) : migration du schéma 1, fiche bancaire complète inchangée
+    après enregistrement, catégorie inconnue conservée, champ mal formé
+    signalé comme corruption, cohérence du catalogue ;
+  - recherche (1) : jamais dans les secrets ;
+  - tri (5) : tag croissant et décroissant sans casse ni accents, par
+    catégorie puis par tag, liste d'origine intacte, préférence inconnue ;
+  - fusion (3) : même tag dans deux catégories, conflit sur un champ de
+    catégorie puis remplacement, doublon ;
+  - interface (4) : saisie d'une fiche bancaire complète (numéros masqués),
+    tri A → Z / Z → A / par catégorie avec en-têtes, changement de
+    catégorie qui garde les champs communs, tri retrouvé à la session
+    suivante.
+- Les tests existants du coffre sont adaptés au modèle par champs. Le test
+  d'interface d'origine attendait 30 s (plafond) la fermeture du formulaire
+  sans avancer l'horloge des animations ; il passe maintenant par une
+  attente qui la fait avancer : de 43 s à 5 s.
+- `flutter test` : 311 tests réussis. `flutter analyze lib test` : 0 erreur
+  (13 remarques préexistantes). `flutter build apk --release` : réussi.
+
+**Limites et suite**
+- Les champs sont fixes par catégorie : pas encore de champs
+  personnalisés ni de catégorie créée par l'utilisateur.
+- Pas de filtre par catégorie (seulement le tri et la recherche, qui
+  reconnaît le nom de la catégorie).
+- Les formats ne sont pas validés (IBAN, numéro de carte, dates) : ce sont
+  des textes libres.

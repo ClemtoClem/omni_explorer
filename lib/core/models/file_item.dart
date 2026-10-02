@@ -10,6 +10,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import '../../app/constants/app_constants.dart';
 import '../utils/file_utils.dart';
+import 'file_filter.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,8 @@ class ShortcutItem {
   final String? iconName;
   /// Couleur ARGB de la tuile (`null` : couleur des dossiers).
   final int?    colorValue;
+  /// Filtres appliqués à l'ouverture du raccourci dans l'explorateur.
+  final FileFilter filter;
 
   const ShortcutItem({
     required this.id,
@@ -124,6 +127,7 @@ class ShortcutItem {
     required this.path,
     this.iconName,
     this.colorValue,
+    this.filter = FileFilter.none,
   });
 
   ShortcutItem copyWith({
@@ -131,6 +135,7 @@ class ShortcutItem {
     String? path,
     String? iconName,
     int? colorValue,
+    FileFilter? filter,
   }) =>
       ShortcutItem(
         id: id,
@@ -138,6 +143,7 @@ class ShortcutItem {
         path: path ?? this.path,
         iconName: iconName ?? this.iconName,
         colorValue: colorValue ?? this.colorValue,
+        filter: filter ?? this.filter,
       );
 
   // ── Sérialisation ──────────────────────────────────────────────────────────
@@ -148,6 +154,7 @@ class ShortcutItem {
     'path':  path,
     'icon':  iconName,
     'color': colorValue,
+    if (!filter.isEmpty) 'filter': filter.toMap(),
   };
 
   factory ShortcutItem.fromMap(Map<String, dynamic> map) => ShortcutItem(
@@ -156,6 +163,8 @@ class ShortcutItem {
     path:       map['path']  as String,
     iconName:   map['icon']  as String?,
     colorValue: map['color'] as int?,
+    filter:     FileFilter.fromMap(
+        (map['filter'] as Map?)?.cast<String, dynamic>()),
   );
 
   @override
@@ -183,6 +192,9 @@ class TrashItem {
   final DateTime deletedAt;
   final bool     isDirectory;
   final int      size;
+  /// Fichier `.trashinfo` de la corbeille du système (Linux) ; `null` pour
+  /// la corbeille de l'application et les orphelins.
+  final String?  infoPath;
 
   const TrashItem({
     required this.trashedPath,
@@ -190,6 +202,7 @@ class TrashItem {
     required this.deletedAt,
     required this.isDirectory,
     required this.size,
+    this.infoPath,
   });
 
   /// Élément présent dans la corbeille mais absent de son index (index

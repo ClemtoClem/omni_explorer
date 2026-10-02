@@ -4,13 +4,16 @@
 /// Gère l'historique de navigation (undo/redo), le chargement des entrées
 /// d'un répertoire, le tri, le filtrage et la sélection multiple.
 
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:omni_explorer/core/services/permissions_service.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../../../app/constants/app_constants.dart';
+import '../../../core/models/file_filter.dart';
 import '../../../core/models/file_item.dart';
+import '../../../core/utils/file_utils.dart';
 import '../../../core/services/file_operations_service.dart';
 import '../../../core/services/file_service.dart';
 import '../../../core/services/settings_service.dart';
@@ -27,53 +30,81 @@ class FileExplorerProvider extends ChangeNotifier {
   }
 
   // ── État de navigation ────────────────────────────────────────────────────
-  String       _currentPath  = '';
-  String       _rootPath     = '/';     // Chemin minimum : bloque navigateUp()
+  String _currentPath = '';
+  String _rootPath = '/'; // Chemin minimum : bloque navigateUp()
   /// Racines de tous les stockages accessibles (interne, cartes SD) : la
   /// navigation peut passer de l'une à l'autre, [_rootPath] suit.
-  List<String>       _roots      = [];
-  final List<String> _history    = [];   // Historique undo
-  final List<String> _redoStack  = [];   // Pile redo
-  List<FileItem>     _entries    = [];
-  List<FileItem>?    _cachedEntries;     // Cache des entrées filtrées/triées
-  bool               _loading    = false;
-  String?            _error;
-  bool               _needsFullStoragePermission = false;
+  List<String> _roots = [];
+  final List<String> _history = []; // Historique undo
+  final List<String> _redoStack = []; // Pile redo
+  List<FileItem> _entries = [];
+  List<FileItem>? _cachedEntries; // Cache des entrées filtrées/triées
+  bool _loading = false;
+  String? _error;
+  bool _needsFullStoragePermission = false;
 
   // ── Sélection ─────────────────────────────────────────────────────────────
-  final Set<String>  _selected   = {};
-  bool               _selectMode = false;
+  final Set<String> _selected = {};
+  bool _selectMode = false;
 
   // ── Filtre ────────────────────────────────────────────────────────────────
-  String        _filterQuery     = '';
-  final Set<FileCategory> _filterCategories = <FileCategory>{};
+  FileFilter _filter = FileFilter.none;
+
+  // ── Recherche dans les sous-dossiers ──────────────────────────────────────
+  /// Plafond de résultats d'une recherche récursive (mémoire, affichage).
+  static const int maxSearchResults = 2000;
+  List<FileItem>? _searchResults;
+  bool _searching = false;
+  bool _searchTruncated = false;
+  int _searchGeneration = 0;
+  StreamSubscription<FileSystemEntity>? _searchSub;
+  Timer? _searchDebounce;
+  bool _searchShowHidden = false;
+
   /// Filtre imposé par le mode sélecteur : les fichiers refusés sont masqués
   /// (les dossiers restent toujours visibles pour naviguer).
   bool Function(FileItem)? _fileFilter;
 
   // ── Presse-papiers (copier / couper / coller) ─────────────────────────────
   final List<String> _clipboard = [];
-  bool               _clipboardCut = false;
+  bool _clipboardCut = false;
 
   // ── Getters ───────────────────────────────────────────────────────────────
-  String         get currentPath    => _currentPath;
-  bool           get loading        => _loading;
-  String?        get error          => _error;
-  bool           get selectMode     => _selectMode;
-  Set<String>    get selected       => Set.unmodifiable(_selected);
-  String         get filterQuery    => _filterQuery;
+  String get currentPath => _currentPath;
+  bool get loading => _loading;
+  String? get error => _error;
+  bool get selectMode => _selectMode;
+  Set<String> get selected => Set.unmodifiable(_selected);
+  FileFilter get filter => _filter;
+  String get filterQuery => _filter.query;
   Set<FileCategory> get filterCategories =>
-      Set.unmodifiable(_filterCategories);
-  bool           get canUndo        => _history.isNotEmpty;
-  bool           get canRedo        => _redoStack.isNotEmpty;
-  bool           get needsFullStoragePermission => _needsFullStoragePermission;
-  String         get rootPath       => _rootPath;
-  bool           get hasClipboard   => _clipboard.isNotEmpty;
-  int            get clipboardCount => _clipboard.length;
-  bool           get clipboardIsCut => _clipboardCut;
+      Set.unmodifiable(_filter.categories);
+  Set<String> get filterExtensions => Set.unmodifiable(_filter.extensions);
+  bool get recursiveSearch => _filter.recursive;
+
+  /// Vrai si la liste affiche les résultats d'une recherche dans les
+  /// sous-dossiers (option active et au moins un critère).
+  bool get showsSearchResults => _filter.recursive && !_filter.selectsNothing;
+  bool get searching => _searching;
+
+  /// La recherche s'est arrêtée à [maxSearchResults] résultats.
+  bool get searchTruncated => _searchTruncated;
+
+  /// Tri appliqué : celui du filtre s'il en impose un, sinon celui des
+  /// préférences.
+  SortMode get effectiveSortMode => _filter.sortMode ?? _settings.sortMode;
+  bool get effectiveSortAsc =>
+      _filter.sortMode != null ? _filter.sortAscending : _settings.sortAsc;
+  bool get canUndo => _history.isNotEmpty;
+  bool get canRedo => _redoStack.isNotEmpty;
+  bool get needsFullStoragePermission => _needsFullStoragePermission;
+  String get rootPath => _rootPath;
+  bool get hasClipboard => _clipboard.isNotEmpty;
+  int get clipboardCount => _clipboard.length;
+  bool get clipboardIsCut => _clipboardCut;
 
   /// Vrai si on est déjà à la racine et qu'on ne peut plus remonter.
-  bool           get isAtRoot       => _currentPath == _rootPath;
+  bool get isAtRoot => _currentPath == _rootPath;
 
   /// Segments du chemin pour la barre de navigation interactive.
   List<String> get pathSegments {
@@ -97,31 +128,31 @@ class FileExplorerProvider extends ChangeNotifier {
   List<FileItem> get entries => _cachedEntries ??= _buildEntries();
 
   List<FileItem> _buildEntries() {
-    final q = _filterQuery.isEmpty ? null : _filterQuery.toLowerCase();
-
-    final list = _entries.where((f) {
+    final source =
+        showsSearchResults ? (_searchResults ?? const <FileItem>[]) : _entries;
+    final list = source.where((f) {
       if (!_settings.showHidden && f.isHidden) return false;
       if (!f.isDirectory && _fileFilter != null && !_fileFilter!(f)) {
         return false;
       }
-      if (q != null && !f.name.toLowerCase().contains(q)) return false;
-      if (_filterCategories.isNotEmpty &&
-          !_filterCategories.contains(f.category)) {
-        return false;
-      }
-      return true;
+      return _filter.accepts(f);
     }).toList();
 
+    final asc = effectiveSortAsc;
     list.sort((a, b) {
       if (a.isDirectory != b.isDirectory) return a.isDirectory ? -1 : 1;
       int cmp;
-      switch (_settings.sortMode) {
-        case SortMode.name: cmp = a.name.toLowerCase().compareTo(b.name.toLowerCase());
-        case SortMode.date: cmp = a.modified.compareTo(b.modified);
-        case SortMode.size: cmp = a.size.compareTo(b.size);
-        case SortMode.type: cmp = a.extension.compareTo(b.extension);
+      switch (effectiveSortMode) {
+        case SortMode.name:
+          cmp = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+        case SortMode.date:
+          cmp = a.modified.compareTo(b.modified);
+        case SortMode.size:
+          cmp = a.size.compareTo(b.size);
+        case SortMode.type:
+          cmp = a.extension.compareTo(b.extension);
       }
-      return _settings.sortAsc ? cmp : -cmp;
+      return asc ? cmp : -cmp;
     });
 
     return list;
@@ -151,12 +182,13 @@ class FileExplorerProvider extends ChangeNotifier {
   /// l'explorateur sans redemander les permissions déjà acquises.
   Future<void> recheckAndInit() async {
     if (!Platform.isAndroid) return;
-    
+
     final wasBlocked = _needsFullStoragePermission;
-    
+
     // On check l'état actuel des permissions de façon passive
     final statuses = await PermissionsService.checkCurrentStatuses();
-    _needsFullStoragePermission = !await PermissionsService.hasManageExternalStorage();
+    _needsFullStoragePermission =
+        !await PermissionsService.hasManageExternalStorage();
 
     if (wasBlocked && !_needsFullStoragePermission) {
       // Permission nouvellement accordée → ré-initialiser le chemin racine et effacer l'erreur s'il y en avait une
@@ -182,7 +214,10 @@ class FileExplorerProvider extends ChangeNotifier {
         }
       } catch (_) {}
 
-      for (final candidate in ['/storage/emulated/0', '/storage/self/primary']) {
+      for (final candidate in [
+        '/storage/emulated/0',
+        '/storage/self/primary'
+      ]) {
         if (Directory(candidate).existsSync()) return candidate;
       }
     }
@@ -302,13 +337,14 @@ class FileExplorerProvider extends ChangeNotifier {
 
   Future<void> _loadEntries() async {
     _loading = true;
-    _error   = null;
+    _error = null;
     notifyListeners();
 
     try {
       // Sécurité : Avant de tenter de lister un répertoire, on s'assure qu'on n'a pas perdu l'accès critique
       if (await PermissionsService.hasMissingCriticalPermissions()) {
-        throw const FileSystemException("Accès refusé : Permissions de stockage manquantes.");
+        throw const FileSystemException(
+            "Accès refusé : Permissions de stockage manquantes.");
       }
 
       final dir = Directory(_currentPath);
@@ -326,17 +362,19 @@ class FileExplorerProvider extends ChangeNotifier {
         }).toList();
         final results = await Future.wait(futures);
         _entries = results.whereType<FileItem>().toList();
-        
-        developer.log('Entries loaded: ${_entries.length}', name: 'FileExplorerProvider');
+
+        developer.log('Entries loaded: ${_entries.length}',
+            name: 'FileExplorerProvider');
       }
     } catch (e) {
-      _error   = e.toString().replaceAll("FileSystemException: ", "");
+      _error = e.toString().replaceAll("FileSystemException: ", "");
       _entries = [];
     }
 
     _loading = false;
     _invalidateCache();
     notifyListeners();
+    _restartSearch();
   }
 
   /// @brief Recharge le répertoire courant.
@@ -344,26 +382,53 @@ class FileExplorerProvider extends ChangeNotifier {
 
   // ── Filtre ────────────────────────────────────────────────────────────────
 
-  void setFilterQuery(String q) {
-    _filterQuery = q;
-    _invalidateCache();
-    notifyListeners();
-  }
+  /// Applique un filtre complet (raccourci de la page Stockage).
+  void applyFilter(FileFilter filter) => _setFilter(filter);
+
+  void setFilterQuery(String q) =>
+      _setFilter(_filter.copyWith(query: q), debounce: true);
 
   /// Remplace l'ensemble des catégories sélectionnées (vide = pas de filtre).
-  void setFilterCategories(Iterable<FileCategory> cats) {
-    _filterCategories
-      ..clear()
-      ..addAll(cats);
-    _invalidateCache();
-    notifyListeners();
-  }
+  void setFilterCategories(Iterable<FileCategory> cats) =>
+      _setFilter(_filter.copyWith(categories: cats.toSet()));
 
   /// Bascule une catégorie dans la sélection (ajout / retrait).
   void toggleFilterCategory(FileCategory cat) {
-    if (!_filterCategories.remove(cat)) _filterCategories.add(cat);
+    final cats = {..._filter.categories};
+    if (!cats.remove(cat)) cats.add(cat);
+    _setFilter(_filter.copyWith(categories: cats));
+  }
+
+  void setFilterExtensions(Set<String> extensions) =>
+      _setFilter(_filter.copyWith(extensions: extensions));
+
+  /// Chercher aussi dans les sous-dossiers du dossier courant.
+  void setRecursiveSearch(bool recursive) =>
+      _setFilter(_filter.copyWith(recursive: recursive));
+
+  /// Revient au tri des préférences (le menu de tri a été utilisé).
+  void clearSortOverride() {
+    if (_filter.sortMode == null) return;
+    _setFilter(_filter.copyWith(clearSort: true));
+  }
+
+  void _setFilter(FileFilter next, {bool debounce = false}) {
+    if (next == _filter) return;
+    final searchChanged = next.query != _filter.query ||
+        next.categories != _filter.categories ||
+        next.extensions != _filter.extensions ||
+        next.recursive != _filter.recursive;
+    _filter = next;
     _invalidateCache();
     notifyListeners();
+    if (!searchChanged) return;
+    _searchDebounce?.cancel();
+    if (debounce && showsSearchResults) {
+      _searchDebounce =
+          Timer(const Duration(milliseconds: 350), _restartSearch);
+    } else {
+      _restartSearch();
+    }
   }
 
   /// Fixe le filtre du mode sélecteur (`null` : aucun fichier masqué).
@@ -373,11 +438,92 @@ class FileExplorerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void clearFilter() {
-    _filterQuery = '';
-    _filterCategories.clear();
+  void clearFilter() => _setFilter(FileFilter.none);
+
+  /// Relance (ou arrête) la recherche dans les sous-dossiers. Les résultats
+  /// arrivent au fil de l'eau ; une recherche plus récente annule la
+  /// précédente.
+  void _restartSearch() {
+    _searchDebounce?.cancel();
+    _searchSub?.cancel();
+    _searchSub = null;
+    final generation = ++_searchGeneration;
+    if (!showsSearchResults || _currentPath.isEmpty) {
+      final wasActive = _searching || _searchResults != null;
+      _searchResults = null;
+      _searching = false;
+      _searchTruncated = false;
+      if (wasActive) {
+        _invalidateCache();
+        notifyListeners();
+      }
+      return;
+    }
+
+    final root = _currentPath;
+    final filter = _filter;
+    final showHidden = _searchShowHidden = _settings.showHidden;
+    final results = <FileItem>[];
+    final pending = <Future<void>>[];
+    var lastNotify = DateTime.now();
+    _searchResults = results;
+    _searching = true;
+    _searchTruncated = false;
     _invalidateCache();
     notifyListeners();
+
+    void publish({bool force = false}) {
+      if (generation != _searchGeneration) return;
+      final now = DateTime.now();
+      if (!force && now.difference(lastNotify).inMilliseconds < 250) return;
+      lastNotify = now;
+      _invalidateCache();
+      notifyListeners();
+    }
+
+    Future<void> finish({bool truncated = false}) async {
+      await Future.wait(pending);
+      if (generation != _searchGeneration) return;
+      _searching = false;
+      _searchTruncated = truncated;
+      publish(force: true);
+    }
+
+    late final StreamSubscription<FileSystemEntity> sub;
+    sub = Directory(root).list(recursive: true, followLinks: false).listen(
+        (entity) {
+      final rel = p.relative(entity.path, from: root);
+      if (!showHidden && p.split(rel).any((seg) => seg.startsWith('.'))) {
+        return;
+      }
+      // Tri rapide sur le nom avant de lire les métadonnées.
+      final name = p.basename(entity.path);
+      final probe = FileItem(
+        path: entity.path,
+        name: name,
+        isDirectory: entity is Directory,
+        size: 0,
+        modified: DateTime.fromMillisecondsSinceEpoch(0),
+        category: FileUtils.categoryOf(entity),
+        isHidden: name.startsWith('.'),
+      );
+      if (!filter.accepts(probe)) return;
+      if (pending.length >= maxSearchResults) {
+        sub.cancel();
+        finish(truncated: true);
+        return;
+      }
+      pending.add(FileItem.fromEntity(entity).then((item) {
+        if (generation != _searchGeneration) return;
+        results.add(item);
+        publish();
+      }, onError: (_) {}));
+    },
+        // Dossier illisible (droits, Android/data…) : on continue.
+        onError: (_) {},
+        onDone: finish,
+        cancelOnError: false);
+    _searchSub = sub;
   }
 
   // ── Sélection ─────────────────────────────────────────────────────────────
@@ -502,7 +648,9 @@ class FileExplorerProvider extends ChangeNotifier {
         if (dirs != null) {
           for (int i = 0; i < dirs.length; i++) {
             var path = dirs[i].path;
-            while (path.contains('/Android')) { path = p.dirname(path); }
+            while (path.contains('/Android')) {
+              path = p.dirname(path);
+            }
             result.add({
               'name': i == 0 ? 'Stockage interne' : 'Carte SD $i',
               'path': path,
@@ -525,10 +673,17 @@ class FileExplorerProvider extends ChangeNotifier {
   void _onSettingsChanged() {
     _invalidateCache();
     notifyListeners();
+    // Les fichiers cachés ne sont pas parcourus : relancer la recherche.
+    if (showsSearchResults && _settings.showHidden != _searchShowHidden) {
+      _restartSearch();
+    }
   }
 
   @override
   void dispose() {
+    _searchGeneration++;
+    _searchSub?.cancel();
+    _searchDebounce?.cancel();
     _settings.removeListener(_onSettingsChanged);
     super.dispose();
   }

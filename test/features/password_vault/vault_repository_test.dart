@@ -47,7 +47,11 @@ void main() {
     return VaultContent([
       for (final t in titles)
         VaultEntry(
-            id: t, title: t, password: 'pw-$t', createdAt: now, updatedAt: now),
+            id: t,
+            title: t,
+            fields: {'password': 'pw-$t'},
+            createdAt: now,
+            updatedAt: now),
     ]);
   }
 

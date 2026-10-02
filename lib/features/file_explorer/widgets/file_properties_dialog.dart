@@ -24,8 +24,8 @@ class _FilePropertiesDialog extends StatefulWidget {
 }
 
 class _FilePropertiesDialogState extends State<_FilePropertiesDialog> {
-  int? _computedSize;   // Taille calculée (récursive pour les dossiers).
-  int? _itemCount;      // Nombre d'éléments directs (dossiers uniquement).
+  int? _computedSize; // Taille calculée (récursive pour les dossiers).
+  int? _itemCount; // Nombre d'éléments directs (dossiers uniquement).
   FileStat? _stat;
   bool _computing = true;
 
@@ -98,8 +98,8 @@ class _FilePropertiesDialogState extends State<_FilePropertiesDialog> {
           ),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(item.name,
-                maxLines: 2, overflow: TextOverflow.ellipsis),
+            child:
+                Text(item.name, maxLines: 2, overflow: TextOverflow.ellipsis),
           ),
         ],
       ),

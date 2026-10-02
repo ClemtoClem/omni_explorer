@@ -14,10 +14,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:external_path/external_path.dart';
 import '../../app/constants/app_constants.dart';
 import '../models/file_item.dart';
 import '../utils/file_utils.dart';
+import 'storage_detector.dart';
 import 'trash_service.dart';
 
 /// Service singleton pour les opérations fichier.
@@ -40,76 +40,12 @@ class FileService {
 
   // ─── Répertoires système ──────────────────────────────────────────────────
 
-  /// Retourne tous les points de montage disponibles (interne + SD cards).
-  ///
-  /// @returns Liste des répertoires racines accessibles.
-  Future<List<StorageInfo>> getAvailableStorages() async {
-    final storages = <StorageInfo>[];
-
-    // ── Stockage interne ──────────────────────────────────────────────────
-    try {
-      final extDir = await getExternalStorageDirectory();
-      if (extDir != null) {
-        // Remonter jusqu'à la racine du stockage interne (/storage/emulated/0)
-        String internalRoot = extDir.path;
-        final parts = internalRoot.split('/');
-        // /storage/emulated/0/Android/... → /storage/emulated/0
-        final idx = parts.indexOf('Android');
-        if (idx > 0) {
-          internalRoot = parts.sublist(0, idx).join('/');
-        }
-        storages.add(StorageInfo(
-          path: internalRoot,
-          label: 'Stockage interne',
-          isExternal: false,
-          isAvailable: Directory(internalRoot).existsSync(),
-        ));
-      }
-    } catch (e) {
-      debugPrint('[FileService] Erreur stockage interne: $e');
-    }
-
-    // ── Stockages externes (SD cards) ─────────────────────────────────────
-    try {
-      final extDirs = await ExternalPath.getExternalStorageDirectories();
-      if (extDirs != null) {
-        for (int i = 0; i < extDirs.length; i++) {
-          String sdPath = extDirs[i];
-          final parts = sdPath.split('/');
-          final idx = parts.indexOf('Android');
-          if (idx > 0) sdPath = parts.sublist(0, idx).join('/');
-
-          // Éviter les doublons
-          if (storages.any((s) => s.path == sdPath)) continue;
-
-          storages.add(StorageInfo(
-            path: sdPath,
-            label: 'Carte SD ${i + 1}',
-            isExternal: true,
-            isAvailable: Directory(sdPath).existsSync(),
-          ));
-        }
-      }
-    } catch (e) {
-      debugPrint('[FileService] Erreur stockages externes: $e');
-    }
-
-    // ── Linux : pas de stockage « externe » Android, le dossier personnel
-    // sert d'espace principal (même racine que l'explorateur).
-    if (storages.isEmpty && Platform.isLinux) {
-      final home = Platform.environment['HOME'];
-      if (home != null && Directory(home).existsSync()) {
-        storages.add(StorageInfo(
-          path: home,
-          label: 'Dossier personnel',
-          isExternal: false,
-          isAvailable: true,
-        ));
-      }
-    }
-
-    return storages;
-  }
+  /// Retourne tous les espaces de stockage accessibles : stockage interne,
+  /// cartes SD, clés et disques USB (Android) ; dossier personnel, système,
+  /// partitions, supports amovibles et partages réseau (Linux).
+  /// Voir [StorageDetector].
+  Future<List<StorageInfo>> getAvailableStorages() =>
+      StorageDetector.detect();
 
   /// Retourne les répertoires par défaut (Documents, Téléchargements, etc.).
   ///
@@ -466,11 +402,40 @@ class FileService {
 // ─── Modèles auxiliaires ──────────────────────────────────────────────────────
 
 /// Informations sur un point de montage de stockage.
+/// Nature d'un espace de stockage (icône et libellé dans l'interface).
+enum StorageKind {
+  /// Stockage interne du téléphone.
+  internal,
+
+  /// Dossier personnel (Linux).
+  home,
+
+  /// Système de fichiers racine (Linux).
+  system,
+
+  /// Autre disque ou partition.
+  disk,
+
+  /// Carte SD / microSD.
+  sdCard,
+
+  /// Clé ou disque USB.
+  usb,
+
+  /// Partage réseau (NFS, SMB, SSHFS…).
+  network,
+
+  /// Disque optique.
+  optical,
+}
+
 class StorageInfo {
   final String path;
   final String label;
   final bool isExternal;
   final bool isAvailable;
+  final StorageKind kind;
+  final bool readOnly;
 
   /// Espace total en octets (0 si non disponible).
   final int totalBytes;
@@ -485,7 +450,12 @@ class StorageInfo {
     required this.isAvailable,
     this.totalBytes = 0,
     this.freeBytes = 0,
-  });
+    StorageKind? kind,
+    this.readOnly = false,
+  }) : kind = kind ?? (isExternal ? StorageKind.sdCard : StorageKind.internal);
+
+  @override
+  String toString() => 'StorageInfo($label, $path, $kind)';
 }
 
 /// Répertoire par défaut du système.

@@ -6,7 +6,9 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
+import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
+import '../../../core/models/file_filter.dart';
 import '../../../core/models/file_item.dart';
 import '../explorer_picker.dart';
 
@@ -79,6 +81,7 @@ typedef ShortcutDraft = ({
   String path,
   String iconName,
   int colorValue,
+  FileFilter filter,
 });
 
 /// Ouvre l'éditeur de raccourci : création si [initial] est `null`,
@@ -117,11 +120,34 @@ class _ShortcutEditorState extends State<_ShortcutEditor> {
   String? _nameError;
   String? _pathError;
 
+  // ── Filtres de recherche appliqués à l'ouverture ──────────────────────────
+  late final FileFilter _initialFilter =
+      widget.initial?.filter ?? FileFilter.none;
+  late final TextEditingController _query =
+      TextEditingController(text: _initialFilter.query);
+  late final TextEditingController _extensions = TextEditingController(
+      text: _initialFilter.extensions.map((e) => '.$e').join(' '));
+  late final Set<FileCategory> _categories = {..._initialFilter.categories};
+  late bool _recursive = _initialFilter.recursive;
+  late SortMode? _sortMode = _initialFilter.sortMode;
+  late bool _sortAsc = _initialFilter.sortAscending;
+
   @override
   void dispose() {
     _name.dispose();
+    _query.dispose();
+    _extensions.dispose();
     super.dispose();
   }
+
+  FileFilter get _filter => FileFilter(
+        query: _query.text.trim(),
+        categories: {..._categories},
+        extensions: FileFilter.parseExtensions(_extensions.text),
+        recursive: _recursive,
+        sortMode: _sortMode,
+        sortAscending: _sortAsc,
+      );
 
   Future<void> _choosePath() async {
     final path = await ExplorerPicker.pickDirectory(
@@ -155,7 +181,110 @@ class _ShortcutEditorState extends State<_ShortcutEditor> {
       path: path!,
       iconName: _icon,
       colorValue: _color.toARGB32(),
+      filter: _filter,
     ));
+  }
+
+  /// Filtres appliqués quand le raccourci ouvre l'explorateur : retrouver
+  /// directement les fichiers voulus (ex. les PDF de Téléchargements, du
+  /// plus récent au plus ancien, sous-dossiers compris).
+  Widget _filterSection(ThemeData theme) {
+    return Theme(
+      // Pas de séparateurs autour de la section repliable.
+      data: theme.copyWith(dividerColor: Colors.transparent),
+      child: ExpansionTile(
+        key: const ValueKey('shortcut-filters'),
+        tilePadding: EdgeInsets.zero,
+        childrenPadding: const EdgeInsets.only(bottom: 8),
+        initiallyExpanded: !_initialFilter.isEmpty,
+        title: Text('Filtres de recherche', style: theme.textTheme.labelLarge),
+        subtitle: Text(
+          _filter.isEmpty
+              ? 'Aucun : tout le contenu du répertoire'
+              : _filter.describe(),
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.bodySmall,
+        ),
+        expandedCrossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            key: const ValueKey('filter-query'),
+            controller: _query,
+            decoration: const InputDecoration(
+              labelText: 'Nom contient',
+              isDense: true,
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 10),
+          Text('Types de fichiers', style: theme.textTheme.bodySmall),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final e in FileFilter.categoryLabels.entries)
+                FilterChip(
+                  label: Text(e.value, style: const TextStyle(fontSize: 12)),
+                  selected: _categories.contains(e.key),
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (on) => setState(() =>
+                      on ? _categories.add(e.key) : _categories.remove(e.key)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            key: const ValueKey('filter-extensions'),
+            controller: _extensions,
+            decoration: const InputDecoration(
+              labelText: 'Extensions',
+              hintText: 'ex. pdf docx odt',
+              isDense: true,
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          SwitchListTile(
+            key: const ValueKey('filter-recursive'),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('Chercher aussi dans les sous-dossiers'),
+            value: _recursive,
+            onChanged: (v) => setState(() => _recursive = v),
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<SortMode?>(
+                  key: const ValueKey('filter-sort'),
+                  initialValue: _sortMode,
+                  isDense: true,
+                  decoration:
+                      const InputDecoration(labelText: 'Tri', isDense: true),
+                  items: [
+                    const DropdownMenuItem(
+                        value: null,
+                        child: Text('Préférence de l\'explorateur')),
+                    for (final e in FileFilter.sortLabels.entries)
+                      DropdownMenuItem(value: e.key, child: Text(e.value)),
+                  ],
+                  onChanged: (m) => setState(() => _sortMode = m),
+                ),
+              ),
+              if (_sortMode != null)
+                IconButton(
+                  tooltip: _sortAsc ? 'Croissant' : 'Décroissant',
+                  icon: Icon(_sortAsc
+                      ? Icons.arrow_upward_rounded
+                      : Icons.arrow_downward_rounded),
+                  onPressed: () => setState(() => _sortAsc = !_sortAsc),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -251,6 +380,8 @@ class _ShortcutEditorState extends State<_ShortcutEditor> {
                     ),
                 ],
               ),
+              const SizedBox(height: 8),
+              _filterSection(theme),
             ],
           ),
         ),

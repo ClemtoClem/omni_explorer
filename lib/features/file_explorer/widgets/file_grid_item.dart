@@ -11,9 +11,9 @@ import '../../../core/utils/file_utils.dart';
 /// @class FileGridItem
 /// @brief Tuile pour la vue grille de l'explorateur.
 class FileGridItem extends StatelessWidget {
-  final FileItem    item;
-  final bool        isSelected;
-  final bool        selectMode;
+  final FileItem item;
+  final bool isSelected;
+  final bool selectMode;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onSelect;
@@ -32,16 +32,16 @@ class FileGridItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final color = FileUtils.colorOf(item.category);
-    final icon  = FileUtils.iconOf(item.category, path: item.path);
+    final icon = FileUtils.iconOf(item.category, path: item.path);
 
     return GestureDetector(
-      onTap:      onTap,
+      onTap: onTap,
       onLongPress: onLongPress,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         decoration: BoxDecoration(
           color: isSelected
-              ? AppColors.accent.withValues(alpha:0.12)
+              ? AppColors.accent.withValues(alpha: 0.12)
               : theme.colorScheme.surface,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
@@ -80,14 +80,16 @@ class FileGridItem extends StatelessWidget {
             // ── Indicateur de sélection ────────────────────────────────────
             if (selectMode)
               Positioned(
-                top: 4, right: 4,
+                top: 4,
+                right: 4,
                 child: GestureDetector(
                   onTap: onSelect,
                   child: Icon(
                     isSelected
                         ? Icons.check_circle_rounded
                         : Icons.radio_button_unchecked_rounded,
-                    color: isSelected ? AppColors.accent : theme.iconTheme.color,
+                    color:
+                        isSelected ? AppColors.accent : theme.iconTheme.color,
                     size: 20,
                   ),
                 ),
@@ -112,7 +114,7 @@ class FileGridItem extends StatelessWidget {
     }
     return Container(
       decoration: BoxDecoration(
-        color: color.withValues(alpha:0.12),
+        color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Icon(icon, color: color, size: 36),

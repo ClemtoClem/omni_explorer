@@ -60,10 +60,10 @@ void main() {
 
     await s.create(pw);
     expect(s.status, VaultStatus.unlocked);
-    final e =
-        await s.addEntry(title: 'Banque', username: 'moi', password: 'x1');
+    final e = await s.addEntry(
+        title: 'Banque', fields: {'username': 'moi', 'password': 'x1'});
     await s.addEntry(title: 'Mail');
-    await s.updateEntry(e.copyWith(password: 'x2'));
+    await s.updateEntry(e.copyWith(fields: {...e.fields, 'password': 'x2'}));
     await s.deleteEntry(s.entries.singleWhere((x) => x.title == 'Mail').id);
 
     s.lock();

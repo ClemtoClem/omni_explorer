@@ -7,19 +7,17 @@
 
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../../app/theme/app_theme.dart';
 import '../../../core/utils/atomic_write.dart';
+import '../../file_explorer/explorer_picker.dart';
 import '../models/vault_errors.dart';
 import '../providers/vault_session.dart';
 import '../services/vault_merge.dart';
 import '../services/vault_repository.dart';
-
-bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
 String _message(Object e) => e is VaultException
     ? e.message
@@ -144,19 +142,22 @@ Future<void> exportVault(BuildContext context) async {
       '${now.day.toString().padLeft(2, '0')}';
   final fileName = 'coffre-omniexplorer-$date.omnivault';
   try {
-    // Android : le sélecteur du système écrit lui-même le fichier.
-    // Linux : le sélecteur renvoie un chemin, écrit ici de façon atomique.
-    final path = await FilePicker.platform.saveFile(
-      dialogTitle: 'Enregistrer l\'export du coffre',
+    // L'explorateur renvoie un chemin (remplacement déjà confirmé) : le
+    // paquet y est écrit de façon atomique, sur Android comme sur Linux.
+    final path = await ExplorerPicker.saveFile(
+      context,
+      title: 'Enregistrer l\'export du coffre',
       fileName: fileName,
-      bytes: _isAndroid ? bytes : null,
+      extensions: {'omnivault'},
     );
     if (path == null) {
       if (context.mounted) _snack(context, 'Export annulé.');
       return;
     }
-    if (!_isAndroid) await AtomicWrite.bytes(path, bytes);
-    if (context.mounted) _snack(context, 'Export enregistré : $fileName');
+    await AtomicWrite.bytes(path, bytes);
+    if (context.mounted) {
+      _snack(context, 'Export enregistré : ${path.split('/').last}');
+    }
   } catch (e) {
     if (context.mounted) {
       _snack(context, 'Enregistrement de l\'export impossible.', error: true);
@@ -169,11 +170,10 @@ Future<void> exportVault(BuildContext context) async {
 /// Importe les entrées d'un paquet verrouillé dans le coffre ouvert.
 Future<void> importVault(BuildContext context) async {
   final session = context.read<VaultSession>();
-  FilePickerResult? picked;
   try {
-    picked = await FilePicker.platform
-        .pickFiles(dialogTitle: 'Choisir un export de coffre');
-    final path = picked?.files.single.path;
+    // Le fichier est lu sur place : aucune copie laissée dans un cache.
+    final path = await ExplorerPicker.pickFile(context,
+        title: 'Choisir un export de coffre');
     if (path == null || !context.mounted) return;
 
     final file = File(path);
@@ -211,11 +211,6 @@ Future<void> importVault(BuildContext context) async {
         ].join(' · '));
   } catch (e) {
     if (context.mounted) _snack(context, _message(e), error: true);
-  } finally {
-    // Android copie le fichier choisi dans le cache : on ne l'y laisse pas.
-    if (_isAndroid && picked != null) {
-      await FilePicker.platform.clearTemporaryFiles();
-    }
   }
 }
 

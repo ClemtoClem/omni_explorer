@@ -25,10 +25,12 @@ void main() {
     VaultEntry(
         id: 'a1',
         title: 'Banque',
-        username: 'clement',
-        password: 'S3cr3t!é',
-        url: 'https://banque.example',
-        notes: 'code agence 42',
+        fields: {
+          'username': 'clement',
+          'password': 'S3cr3t!é',
+          'url': 'https://banque.example',
+          'notes': 'code agence 42',
+        },
         createdAt: now,
         updatedAt: now),
   ]);

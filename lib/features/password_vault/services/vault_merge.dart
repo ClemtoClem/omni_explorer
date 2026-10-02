@@ -2,8 +2,10 @@
 /// @brief Fusion des entrées d'un export dans le coffre ouvert.
 ///
 /// Une entrée importée « correspond » à une entrée existante si elle a le
-/// même identifiant interne (export de ce même coffre), ou le même titre,
-/// identifiant et adresse (même compte saisi sur un autre appareil).
+/// même identifiant interne (export de ce même coffre), ou la même
+/// catégorie, le même tag et le même champ résumé de la catégorie
+/// (identifiant, adresse e-mail, banque… : même information saisie sur un
+/// autre appareil).
 /// - aucune correspondance : entrée ajoutée ;
 /// - correspondance au contenu identique : ignorée (doublon) ;
 /// - correspondance au contenu différent : conflit, résolu selon le choix de
@@ -51,17 +53,12 @@ class VaultMerge {
   static const String keptBothSuffix = ' (importé)';
 
   static String _key(VaultEntry e) => [
+        e.categoryKey,
         e.title.trim().toLowerCase(),
-        e.username,
+        e.summary.trim().toLowerCase(),
+        // Les sites web se distinguent aussi par leur adresse.
         e.url.trim().toLowerCase(),
       ].join('\u0000');
-
-  static bool _sameContent(VaultEntry a, VaultEntry b) =>
-      a.title == b.title &&
-      a.username == b.username &&
-      a.password == b.password &&
-      a.url == b.url &&
-      a.notes == b.notes;
 
   /// Classe les entrées importées [incoming] par rapport à [existing].
   static ImportPlan plan(List<VaultEntry> existing, List<VaultEntry> incoming) {
@@ -78,7 +75,7 @@ class VaultMerge {
       final match = byId[e.id] ?? byKey[_key(e)];
       if (match == null) {
         added.add(e);
-      } else if (_sameContent(match, e)) {
+      } else if (match.sameContent(e)) {
         identical.add(e);
       } else {
         conflicts.add(ImportConflict(match, e));
@@ -104,10 +101,8 @@ class VaultMerge {
       return VaultEntry(
         id: newId(),
         title: e.title,
-        username: e.username,
-        password: e.password,
-        url: e.url,
-        notes: e.notes,
+        categoryKey: e.categoryKey,
+        fields: e.fields,
         createdAt: e.createdAt,
         updatedAt: now,
       );
@@ -125,22 +120,20 @@ class VaultMerge {
           break;
         case ImportConflictChoice.replace:
           final i = result.indexWhere((e) => e.id == c.existing.id);
-          result[i] = c.existing.copyWith(
+          result[i] = VaultEntry(
+            id: c.existing.id,
             title: c.incoming.title,
-            username: c.incoming.username,
-            password: c.incoming.password,
-            url: c.incoming.url,
-            notes: c.incoming.notes,
+            categoryKey: c.incoming.categoryKey,
+            fields: c.incoming.fields,
+            createdAt: c.existing.createdAt,
             updatedAt: now,
           );
         case ImportConflictChoice.keepBoth:
           final copy = VaultEntry(
             id: newId(),
             title: '${c.incoming.title}$keptBothSuffix',
-            username: c.incoming.username,
-            password: c.incoming.password,
-            url: c.incoming.url,
-            notes: c.incoming.notes,
+            categoryKey: c.incoming.categoryKey,
+            fields: c.incoming.fields,
             createdAt: c.incoming.createdAt,
             updatedAt: now,
           );

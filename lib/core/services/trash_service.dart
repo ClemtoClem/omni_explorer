@@ -2,8 +2,15 @@
 /// @brief Service de gestion de la corbeille d'OmniExplorer.
 ///
 /// Gère le déplacement des fichiers vers la corbeille, leur restauration
-/// et leur suppression définitive, dans un répertoire caché ".omni_trash".
+/// et leur suppression définitive :
+/// - **Linux** : corbeille du système ([XdgTrash], spécification
+///   freedesktop), partagée avec le gestionnaire de fichiers du bureau ; ce
+///   qu'un autre logiciel y met apparaît dans l'application (relecture à
+///   chaque modification du dossier `info/`) ;
+/// - **Android** (et tests) : répertoire caché ".omni_trash" de
+///   l'application, avec son index.
 ///
+/// Garanties de la corbeille de l'application :
 /// Garanties :
 /// - l'index (chemins d'origine) est écrit de façon atomique ; un index
 ///   illisible est conservé de côté au lieu d'être perdu ;
@@ -16,6 +23,8 @@
 
 import 'dart:convert';
 import 'dart:io';
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -24,6 +33,7 @@ import '../../app/constants/app_constants.dart';
 import '../models/file_item.dart';
 import '../utils/atomic_write.dart';
 import 'file_operations_service.dart';
+import 'xdg_trash.dart';
 
 /// @class TrashService
 /// @brief Singleton gérant la corbeille de l'application.
@@ -37,21 +47,41 @@ class TrashService extends ChangeNotifier {
   Directory? _trashDir;
   final List<TrashItem> _items = [];
 
+  /// Corbeille du système (Linux) ; `null` : corbeille de l'application.
+  XdgTrash? _system;
+  StreamSubscription<FileSystemEvent>? _watch;
+  Timer? _reloadDebounce;
+
+  /// Vrai si la corbeille utilisée est celle du système (Linux).
+  bool get usesSystemTrash => _system != null;
+
   /// Liste des éléments en corbeille.
   List<TrashItem> get items => List.unmodifiable(_items);
 
   /// Chemin du répertoire de la corbeille (initialise le service si besoin).
   Future<String> get trashDirectory async {
     await _ensureInit();
-    return _trashDir!.path;
+    return _system?.homeTrash ?? _trashDir!.path;
   }
 
   // ── Initialisation ────────────────────────────────────────────────────────
 
   /// @brief Initialise le répertoire de la corbeille et charge l'index.
   ///
-  /// [directory] remplace l'emplacement par défaut (tests).
-  Future<void> init({String? directory}) async {
+  /// [directory] impose la corbeille de l'application à cet emplacement
+  /// (tests) ; [systemTrash] impose une corbeille du système (tests). Sans
+  /// l'un ni l'autre : corbeille du système sous Linux, de l'application
+  /// ailleurs.
+  Future<void> init({String? directory, XdgTrash? systemTrash}) async {
+    await _stopWatching();
+    if (directory == null && (systemTrash != null || Platform.isLinux)) {
+      _system = systemTrash ?? XdgTrash.forCurrentUser();
+      _trashDir = null;
+      await reload();
+      _startWatching();
+      return;
+    }
+    _system = null;
     final String path;
     if (directory != null) {
       path = directory;
@@ -73,6 +103,12 @@ class TrashService extends ChangeNotifier {
   /// (l'élément reste alors à sa place).
   Future<TrashItem> moveToTrash(String path) async {
     await _ensureInit();
+    if (_system case final system?) {
+      final item = await system.trash(path);
+      _items.insert(0, item);
+      notifyListeners();
+      return item;
+    }
     final type = FileSystemEntity.typeSync(path, followLinks: false);
     if (type == FileSystemEntityType.notFound) {
       throw FileOpException('« ${p.basename(path)} » n\'existe plus.');
@@ -165,9 +201,13 @@ class TrashService extends ChangeNotifier {
     }
     final String? restoredTo;
     try {
-      await Directory(p.dirname(item.originalPath)).create(recursive: true);
-      restoredTo = await _ops.relocate(item.trashedPath, item.originalPath,
-          move: true, onConflict: onConflict);
+      if (_system case final system?) {
+        restoredTo = await system.restore(item, onConflict: onConflict);
+      } else {
+        await Directory(p.dirname(item.originalPath)).create(recursive: true);
+        restoredTo = await _ops.relocate(item.trashedPath, item.originalPath,
+            move: true, onConflict: onConflict);
+      }
     } catch (e) {
       throw FileOpException(
           'Impossible de restaurer « ${item.name} » : ${_describe(e)}');
@@ -181,6 +221,11 @@ class TrashService extends ChangeNotifier {
   /// @brief Supprime définitivement un élément de la corbeille.
   /// Lève [FileOpException] en cas d'échec (l'élément reste listé).
   Future<void> deletePermanently(TrashItem item) async {
+    if (_system case final system?) {
+      await system.delete(item);
+      await _forget(item);
+      return;
+    }
     final report = await _ops.deletePermanently([item.trashedPath]);
     if (report.hasFailures) {
       throw FileOpException('Impossible de supprimer « ${item.name} » : '
@@ -207,6 +252,45 @@ class TrashService extends ChangeNotifier {
 
   /// @brief Retourne la taille totale des éléments en corbeille.
   int get totalSize => _items.fold(0, (s, i) => s + i.size);
+
+  // ── Relecture ─────────────────────────────────────────────────────────────
+
+  /// Relit le contenu de la corbeille (modifiée par un autre logiciel,
+  /// réconciliation de l'index).
+  Future<void> reload() async {
+    if (_system case final system?) {
+      final items = await Future(system.list);
+      _items
+        ..clear()
+        ..addAll(items);
+      notifyListeners();
+    } else if (_trashDir != null) {
+      await _loadMeta();
+    }
+  }
+
+  /// Surveille `info/` de la corbeille personnelle : un élément mis à la
+  /// corbeille (ou restauré) par le gestionnaire de fichiers apparaît sans
+  /// relancer l'application.
+  void _startWatching() {
+    final info = Directory(p.join(_system!.homeTrash, 'info'));
+    try {
+      info.createSync(recursive: true);
+      _watch = info.watch().listen((_) {
+        _reloadDebounce?.cancel();
+        _reloadDebounce =
+            Timer(const Duration(milliseconds: 300), () => reload());
+      }, onError: (_) {});
+    } catch (e) {
+      debugPrint('[Trash] surveillance impossible : $e');
+    }
+  }
+
+  Future<void> _stopWatching() async {
+    _reloadDebounce?.cancel();
+    await _watch?.cancel();
+    _watch = null;
+  }
 
   // ── Persistance ───────────────────────────────────────────────────────────
 
@@ -281,12 +365,12 @@ class TrashService extends ChangeNotifier {
   /// Retire [item] de l'index (son contenu n'est plus dans la corbeille).
   Future<void> _forget(TrashItem item) async {
     _items.remove(item);
-    await _saveMetaQuietly();
+    if (_system == null) await _saveMetaQuietly();
     notifyListeners();
   }
 
   Future<void> _ensureInit() async {
-    if (_trashDir == null) await init();
+    if (_trashDir == null && _system == null) await init();
   }
 
   static String _describe(Object e) => switch (e) {

@@ -12,14 +12,15 @@ import '../../../app/theme/app_theme.dart';
 /// @class PathBar
 /// @brief Widget de barre de chemin interactive.
 class PathBar extends StatefulWidget {
-  final String     currentPath;
+  final String currentPath;
+
   /// Chemin minimum affiché (les segments au-dessus sont masqués).
-  final String     rootPath;
-  final void Function(String)  onNavigate;
-  final void Function(int)     onSegmentTap;
-  final VoidCallback?          onUp;
-  final VoidCallback?          onUndo;
-  final VoidCallback?          onRedo;
+  final String rootPath;
+  final void Function(String) onNavigate;
+  final void Function(int) onSegmentTap;
+  final VoidCallback? onUp;
+  final VoidCallback? onUndo;
+  final VoidCallback? onRedo;
 
   const PathBar({
     super.key,
@@ -76,10 +77,10 @@ class _PathBarState extends State<PathBar> {
 
   @override
   Widget build(BuildContext context) {
-    final theme   = Theme.of(context);
-    final isDark  = theme.brightness == Brightness.dark;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
     final bgColor = isDark ? AppColors.darkSurface : AppColors.lightSurface;
-    final border  = isDark ? AppColors.darkBorder   : AppColors.lightBorder;
+    final border = isDark ? AppColors.darkBorder : AppColors.lightBorder;
 
     return Container(
       height: 44,
@@ -111,7 +112,9 @@ class _PathBarState extends State<PathBar> {
           Container(width: 1, height: 28, color: border),
           // ── Chemin (mode affichage ou édition) ─────────────────────────
           Expanded(
-            child: _editMode ? _buildEditMode(context) : _buildDisplayMode(context),
+            child: _editMode
+                ? _buildEditMode(context)
+                : _buildDisplayMode(context),
           ),
           // ── Bouton bascule mode édition ────────────────────────────────
           Tooltip(
@@ -137,12 +140,14 @@ class _PathBarState extends State<PathBar> {
   // ── Mode affichage ────────────────────────────────────────────────────────
 
   Widget _buildDisplayMode(BuildContext context) {
-    final theme    = Theme.of(context);
-    final allSegs  = widget.currentPath.split('/').where((s) => s.isNotEmpty).toList();
-    final rootSegs = widget.rootPath.split('/').where((s) => s.isNotEmpty).toList();
+    final theme = Theme.of(context);
+    final allSegs =
+        widget.currentPath.split('/').where((s) => s.isNotEmpty).toList();
+    final rootSegs =
+        widget.rootPath.split('/').where((s) => s.isNotEmpty).toList();
     // Miroir de provider.pathSegments : commence au dernier segment de rootPath.
     final offset = (rootSegs.length - 1).clamp(0, allSegs.length);
-    final segs   = allSegs.sublist(offset);
+    final segs = allSegs.sublist(offset);
 
     return GestureDetector(
       onDoubleTap: () => setState(() => _editMode = true),
@@ -161,7 +166,8 @@ class _PathBarState extends State<PathBar> {
             for (int i = 0; i < segs.length; i++) ...[
               if (i > 0)
                 Icon(Icons.chevron_right_rounded,
-                    size: 16, color: theme.iconTheme.color?.withValues(alpha: 0.4)),
+                    size: 16,
+                    color: theme.iconTheme.color?.withValues(alpha: 0.4)),
               _PathSegment(
                 label: segs[i],
                 onTap: () => widget.onSegmentTap(i),
@@ -199,8 +205,8 @@ class _PathBarState extends State<PathBar> {
       setState(() {
         _editMode = true;
         _ctrl.text = widget.currentPath;
-        _ctrl.selection = TextSelection(
-            baseOffset: 0, extentOffset: _ctrl.text.length);
+        _ctrl.selection =
+            TextSelection(baseOffset: 0, extentOffset: _ctrl.text.length);
       });
     }
   }
@@ -217,9 +223,9 @@ class _PathBarState extends State<PathBar> {
 /// @class _PathSegment
 /// @brief Bouton représentant un segment du chemin.
 class _PathSegment extends StatelessWidget {
-  final String      label;
+  final String label;
   final VoidCallback onTap;
-  final bool        isLast;
+  final bool isLast;
 
   const _PathSegment({
     required this.label,
@@ -237,7 +243,7 @@ class _PathSegment extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
         decoration: isLast
             ? BoxDecoration(
-                color: AppColors.accent.withValues(alpha:0.12),
+                color: AppColors.accent.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(6),
               )
             : null,
@@ -246,9 +252,8 @@ class _PathSegment extends StatelessWidget {
           style: GoogleFonts.jost(
             fontSize: 12,
             fontWeight: isLast ? FontWeight.w600 : FontWeight.w400,
-            color: isLast
-                ? AppColors.accent
-                : theme.textTheme.bodyMedium?.color,
+            color:
+                isLast ? AppColors.accent : theme.textTheme.bodyMedium?.color,
           ),
         ),
       ),
@@ -261,9 +266,9 @@ class _PathSegment extends StatelessWidget {
 /// @class _NavBtn
 /// @brief Bouton de navigation de la barre de chemin.
 class _NavBtn extends StatelessWidget {
-  final IconData  icon;
-  final String    tooltip;
-  final bool      enabled;
+  final IconData icon;
+  final String tooltip;
+  final bool enabled;
   final VoidCallback? onTap;
 
   const _NavBtn({
@@ -288,7 +293,7 @@ class _NavBtn extends StatelessWidget {
             size: 18,
             color: enabled
                 ? Theme.of(context).iconTheme.color
-                : Theme.of(context).iconTheme.color?.withValues(alpha:0.3),
+                : Theme.of(context).iconTheme.color?.withValues(alpha: 0.3),
           ),
         ),
       ),

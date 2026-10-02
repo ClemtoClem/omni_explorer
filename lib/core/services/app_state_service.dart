@@ -14,14 +14,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Identifiant stable des fonctionnalités exposées dans le launcher.
 enum AppFeature {
   fileExplorer,
-  images,
+  /*images,
   mediaPlayer,
-  pdfViewer,
+  pdfViewer,*/
   textEditor,
   videoEditor,
   passwordVault,
   settings,
-  recents,
+  /*recents,*/
 }
 
 class AppStateService extends ChangeNotifier {

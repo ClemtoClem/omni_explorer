@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 import '../../app/constants/app_constants.dart';
 import '../../app/theme/app_theme.dart';
 import '../../app/theme/app_theme_presets.dart';
+import '../models/file_filter.dart';
 import '../models/file_item.dart';
 
 /// @class SettingsService
@@ -410,6 +411,7 @@ class SettingsService extends ChangeNotifier {
             path: d.path,
             iconName: d.iconName,
             colorValue: d.colorValue,
+            filter: d.filter,
           ),
       ..._shortcuts,
     ];
@@ -420,7 +422,9 @@ class SettingsService extends ChangeNotifier {
 
   /// Ajoute un raccourci. Renvoie `false` si [path] en a déjà un.
   Future<bool> addShortcut(String name, String path,
-      {String? iconName, int? colorValue}) async {
+      {String? iconName,
+      int? colorValue,
+      FileFilter filter = FileFilter.none}) async {
     if (_shortcuts.any((s) => s.path == path)) return false;
     _shortcuts.add(ShortcutItem(
       id: _uuid.v4(),
@@ -428,6 +432,7 @@ class SettingsService extends ChangeNotifier {
       path: path,
       iconName: iconName,
       colorValue: colorValue,
+      filter: filter,
     ));
     await _saveShortcuts();
     notifyListeners();

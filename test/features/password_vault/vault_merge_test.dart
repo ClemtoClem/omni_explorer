@@ -14,9 +14,7 @@ void main() {
       VaultEntry(
           id: id,
           title: title,
-          username: user,
-          password: pw,
-          url: url,
+          fields: {'username': user, 'password': pw, 'url': url},
           createdAt: t0,
           updatedAt: t0);
 

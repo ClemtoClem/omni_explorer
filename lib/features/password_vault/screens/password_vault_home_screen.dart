@@ -462,8 +462,8 @@ class _VaultListViewState extends State<_VaultListView> {
   Widget build(BuildContext context) {
     final session = context.watch<VaultSession>();
     final mode = session.sortMode;
-    final entries = sortVaultEntries(
-        session.entries.where((e) => e.matches(_query)), mode);
+    final entries =
+        sortVaultEntries(session.entries.where((e) => e.matches(_query)), mode);
 
     // Liste à plat : en-têtes de catégorie (tri par catégorie) et entrées.
     final rows = <Object>[];
@@ -549,8 +549,7 @@ class _VaultListViewState extends State<_VaultListView> {
                     itemBuilder: (_, i) {
                       final row = rows[i];
                       if (row is VaultCategory) return _CategoryHeader(row);
-                      return _entryTile(
-                          row as VaultEntry,
+                      return _entryTile(row as VaultEntry,
                           showCategory: mode != VaultSortMode.category);
                     },
                   ),
@@ -630,8 +629,10 @@ class _CategoryHeader extends StatelessWidget {
           const SizedBox(width: 8),
           Text(
             category.label.toUpperCase(),
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                color: category.color, fontWeight: FontWeight.w700),
+            style: Theme.of(context)
+                .textTheme
+                .labelMedium
+                ?.copyWith(color: category.color, fontWeight: FontWeight.w700),
           ),
         ],
       ),

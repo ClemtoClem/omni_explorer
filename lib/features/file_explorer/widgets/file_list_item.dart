@@ -34,6 +34,10 @@ class FileListItem extends StatelessWidget {
   /// sélecteur, où l'explorateur sert seulement à choisir.
   final bool showActions;
 
+  /// Dossier de l'élément, relatif au dossier courant (résultats d'une
+  /// recherche dans les sous-dossiers) ; `null` : non affiché.
+  final String? location;
+
   const FileListItem({
     super.key,
     required this.item,
@@ -43,6 +47,7 @@ class FileListItem extends StatelessWidget {
     required this.onLongPress,
     required this.onSelect,
     this.showActions = true,
+    this.location,
   });
 
   @override
@@ -110,9 +115,11 @@ class FileListItem extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    item.isDirectory
-                        ? FileUtils.formatDate(item.modified)
-                        : '${FileUtils.formatSize(item.size)}  •  ${FileUtils.formatDate(item.modified)}',
+                    [
+                      if (location != null) location == '.' ? './' : location!,
+                      if (!item.isDirectory) FileUtils.formatSize(item.size),
+                      FileUtils.formatDate(item.modified),
+                    ].join('  •  '),
                     style: theme.textTheme.bodySmall,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -286,10 +293,8 @@ class _ContextMenuBtn extends StatelessWidget {
 
       case _ContextAction.shortcut:
         final messenger = ScaffoldMessenger.of(ctx);
-        ctx
-            .read<SettingsService>()
-            .addShortcut(item.name, item.path)
-            .then((added) => messenger.showSnackBar(SnackBar(
+        ctx.read<SettingsService>().addShortcut(item.name, item.path).then(
+            (added) => messenger.showSnackBar(SnackBar(
                 content: Text(added
                     ? 'Raccourci créé pour « ${item.name} »'
                     : '« ${item.name} » a déjà un raccourci'))));

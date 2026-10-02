@@ -17,6 +17,7 @@ import '../../../../core/utils/responsive.dart';
 
 import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
+import '../../../core/models/file_filter.dart';
 import '../../../core/models/file_item.dart';
 import '../../../core/services/app_state_service.dart';
 import '../../../core/services/file_operations_service.dart';
@@ -50,11 +51,16 @@ class FileExplorerScreen extends StatefulWidget {
   /// choisis via `Navigator.pop`. Ouvert par [ExplorerPicker].
   final ExplorerPickRequest? pick;
 
+  /// Filtre appliqué à l'ouverture (raccourci de la page Stockage) :
+  /// nom, catégories, extensions, sous-dossiers, tri.
+  final FileFilter? initialFilter;
+
   const FileExplorerScreen({
     super.key,
     this.initialCategories = const {},
     this.initialPath,
     this.pick,
+    this.initialFilter,
   });
 
   @override
@@ -118,7 +124,14 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       }
 
       if (!mounted) return;
-      if (widget.initialCategories.isNotEmpty) {
+      final filter = widget.initialFilter;
+      if (filter != null && !filter.isEmpty) {
+        _provider.applyFilter(filter);
+        // Le tri seul ne demande pas d'afficher la barre de filtres.
+        if (!filter.selectsNothing || filter.recursive) {
+          setState(() => _showFilter = true);
+        }
+      } else if (widget.initialCategories.isNotEmpty) {
         _provider.setFilterCategories(widget.initialCategories);
         setState(() => _showFilter = true);
       }
@@ -177,8 +190,15 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                 FilterBar(
                   query: prov.filterQuery,
                   selectedCategories: prov.filterCategories,
+                  extensions: prov.filterExtensions,
+                  recursive: prov.recursiveSearch,
+                  searching: prov.searching,
+                  truncated: prov.searchTruncated,
+                  resultCount: prov.entries.length,
                   onQueryChanged: prov.setFilterQuery,
                   onCategoryToggled: prov.toggleFilterCategory,
+                  onExtensionsChanged: prov.setFilterExtensions,
+                  onRecursiveChanged: prov.setRecursiveSearch,
                   onClear: prov.clearFilter,
                 ),
               const Divider(height: 1),
@@ -243,7 +263,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                         : ViewMode.list,
                   ),
                 ),
-                _buildSortMenu(context, settings),
+                _buildSortMenu(context, settings, prov),
                 IconButton(
                   icon: const Icon(Icons.refresh_rounded),
                   onPressed: prov.refresh,
@@ -284,19 +304,21 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     );
   }
 
-  Widget _buildSortMenu(BuildContext context, SettingsService settings) {
-    const labels = <SortMode, String>{
-      SortMode.name: 'Nom',
-      SortMode.date: 'Date',
-      SortMode.size: 'Taille',
-      SortMode.type: 'Type',
-    };
+  Widget _buildSortMenu(BuildContext context, SettingsService settings,
+      FileExplorerProvider prov) {
+    const labels = FileFilter.sortLabels;
+    // Tri imposé par un raccourci : affiché, puis remplacé par le choix de
+    // l'utilisateur (qui devient la préférence).
+    final current = prov.effectiveSortMode;
+    final asc = prov.effectiveSortAsc;
     return PopupMenuButton<SortMode>(
       icon: const Icon(Icons.sort_rounded),
       tooltip: 'Trier par',
       onSelected: (mode) {
-        if (settings.sortMode == mode) {
-          settings.setSortAsc(!settings.sortAsc);
+        prov.clearSortOverride();
+        if (current == mode) {
+          settings.setSortMode(mode);
+          settings.setSortAsc(!asc);
         } else {
           settings.setSortMode(mode);
         }
@@ -307,10 +329,8 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           child: Row(
             children: [
               Icon(
-                settings.sortMode == m
-                    ? (settings.sortAsc
-                        ? Icons.arrow_upward
-                        : Icons.arrow_downward)
+                current == m
+                    ? (asc ? Icons.arrow_upward : Icons.arrow_downward)
                     : Icons.sort,
                 size: 16,
               ),
@@ -328,7 +348,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
   Widget _buildBody(BuildContext context, FileExplorerProvider prov) {
     if (prov.loading) return const Center(child: CircularProgressIndicator());
     if (prov.error != null) return _buildError(prov.error!);
-    if (prov.entries.isEmpty) return _buildEmpty();
+    if (prov.entries.isEmpty) return _buildEmpty(prov);
 
     final settings = context.watch<SettingsService>();
     return settings.viewMode == ViewMode.grid
@@ -350,6 +370,10 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           onLongPress: () => _onItemLongPress(item, prov),
           onSelect: () => prov.toggleSelect(item.path),
           showActions: _pick == null,
+          // Résultat d'une recherche dans les sous-dossiers : où il se trouve.
+          location: prov.showsSearchResults
+              ? p.relative(p.dirname(item.path), from: prov.currentPath)
+              : null,
         );
       },
     );
@@ -382,17 +406,23 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     );
   }
 
-  Widget _buildEmpty() {
+  Widget _buildEmpty(FileExplorerProvider prov) {
+    if (prov.searching) {
+      return const Center(child: Text('Recherche dans les sous-dossiers…'));
+    }
+    final filtered = !prov.filter.selectsNothing;
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.folder_open_rounded,
+          Icon(filtered ? Icons.search_off_rounded : Icons.folder_open_rounded,
               size: 64,
               color: Theme.of(context).iconTheme.color?.withValues(alpha: 0.3)),
           const SizedBox(height: 16),
           Text(
-            'Répertoire vide',
+            filtered
+                ? 'Aucun élément ne correspond aux filtres'
+                : 'Répertoire vide',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color:
                       Theme.of(context).iconTheme.color?.withValues(alpha: 0.5),

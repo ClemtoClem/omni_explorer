@@ -11,6 +11,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omni_explorer/app/constants/app_constants.dart';
+import 'package:omni_explorer/core/models/file_filter.dart';
 import 'package:omni_explorer/core/services/app_state_service.dart';
 import 'package:omni_explorer/core/services/settings_service.dart';
 import 'package:omni_explorer/core/services/trash_service.dart';
@@ -58,7 +59,9 @@ void main() {
         child: const MaterialApp(home: StorageScreen()),
       ));
     });
-    await settleIo(tester, until: () => shown('Raccourcis'));
+    // Page chargée (la liste des raccourcis peut être sous les cartes des
+    // supports, donc pas encore construite).
+    await settleIo(tester, until: () => shown('Explorer'));
   }
 
   /// L'explorateur affiche le contenu chargé du dossier [name] du bac à sable.
@@ -69,8 +72,14 @@ void main() {
         find.byType(CircularProgressIndicator).evaluate().isEmpty;
   }
 
-  Future<void> scrollTo(WidgetTester tester, Finder f) => tester
-      .scrollUntilVisible(f, 200, scrollable: find.byType(Scrollable).first);
+  /// Amène [f] à l'écran : construit (zone de cache) ne suffit pas pour
+  /// le toucher.
+  Future<void> scrollTo(WidgetTester tester, Finder f) async {
+    await tester.scrollUntilVisible(f, 200,
+        scrollable: find.byType(Scrollable).first);
+    await tester.ensureVisible(f);
+    await tester.pumpAndSettle();
+  }
 
   testWidgets('modifier l\'icône et le nom d\'un raccourci', (tester) async {
     await open(tester);
@@ -143,5 +152,84 @@ void main() {
     expect(find.text('Donnez un nom au raccourci'), findsOneWidget);
     expect(find.text('Choisissez un répertoire'), findsOneWidget);
     expect(settings.shortcuts, hasLength(1));
+  });
+
+  testWidgets('bouton « Fichiers récents »', (tester) async {
+    await open(tester);
+    await tester.tap(find.byTooltip('Fichiers récents'));
+    await tester.pumpAndSettle();
+    expect(find.text('Fichiers récents'), findsOneWidget);
+    expect(find.text('Aucun fichier récent'), findsOneWidget);
+  });
+
+  testWidgets('configurer les filtres de recherche d\'un raccourci',
+      (tester) async {
+    await open(tester);
+    await scrollTo(tester, find.text('Projets'));
+    await tester.longPress(find.text('Projets'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Modifier'));
+    await tester.pumpAndSettle();
+
+    // Le dialogue défile : chaque champ est amené à l'écran avant usage.
+    Future<void> visible(Finder f) async {
+      await tester.ensureVisible(f);
+      await tester.pumpAndSettle();
+    }
+
+    await visible(find.text('Filtres de recherche'));
+    await tester.tap(find.text('Filtres de recherche'));
+    await tester.pumpAndSettle();
+    await visible(find.byKey(const ValueKey('filter-query')));
+    await tester.enterText(
+        find.byKey(const ValueKey('filter-query')), 'rapport');
+    await visible(find.byKey(const ValueKey('filter-extensions')));
+    await tester.enterText(
+        find.byKey(const ValueKey('filter-extensions')), '.PDF, odt');
+    await visible(find.widgetWithText(FilterChip, 'PDF'));
+    await tester.tap(find.widgetWithText(FilterChip, 'PDF'));
+    await visible(find.byKey(const ValueKey('filter-recursive')));
+    await tester.tap(find.byKey(const ValueKey('filter-recursive')));
+    await tester.pumpAndSettle();
+    // Le résumé de la section reflète la saisie.
+    expect(find.text('« rapport » · PDF · .pdf .odt · sous-dossiers'),
+        findsOneWidget);
+
+    await visible(find.text('Enregistrer'));
+    await tester.tap(find.text('Enregistrer'));
+    await tester.pumpAndSettle();
+    expect(
+        settings.shortcuts.single.filter,
+        const FileFilter(
+          query: 'rapport',
+          categories: {FileCategory.pdf},
+          extensions: {'pdf', 'odt'},
+          recursive: true,
+        ));
+  });
+
+  testWidgets('un raccourci filtré ouvre l\'explorateur sur sa recherche',
+      (tester) async {
+    File(p.join(sandbox.path, 'Projets', 'a', 'b', 'devis.pdf'))
+      ..createSync(recursive: true)
+      ..writeAsStringSync('x');
+    File(p.join(sandbox.path, 'Projets', 'notes.txt')).writeAsStringSync('n');
+    await open(tester);
+    await tester.runAsync(() => settings.updateShortcut(
+        settings.shortcuts.single.copyWith(
+            filter: const FileFilter(extensions: {'pdf'}, recursive: true))));
+    await tester.pump();
+
+    await scrollTo(tester, find.text('Projets'));
+    await tester.tap(find.text('Projets'));
+    await settleIo(tester, until: () => shown('devis.pdf'));
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(find.text('devis.pdf'), findsOneWidget);
+    expect(find.text('notes.txt'), findsNothing);
+    expect(find.textContaining('a/b'), findsOneWidget); // emplacement
+    final chip = tester
+        .widget<FilterChip>(find.widgetWithText(FilterChip, 'Sous-dossiers'));
+    expect(chip.selected, isTrue);
   });
 }

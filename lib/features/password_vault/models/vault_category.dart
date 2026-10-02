@@ -124,10 +124,10 @@ enum VaultCategory {
       VaultField('bic', 'BIC / SWIFT', VaultFieldKind.text),
       VaultField('rib', 'RIB (banque, guichet, compte, clé)',
           VaultFieldKind.multilineSecret),
-      VaultField('onlineLogin', 'Identifiant d\'accès en ligne',
-          VaultFieldKind.text),
-      VaultField('onlinePassword', 'Code d\'accès en ligne',
-          VaultFieldKind.password),
+      VaultField(
+          'onlineLogin', 'Identifiant d\'accès en ligne', VaultFieldKind.text),
+      VaultField(
+          'onlinePassword', 'Code d\'accès en ligne', VaultFieldKind.password),
       _notes,
     ],
     summary: 'bankName',

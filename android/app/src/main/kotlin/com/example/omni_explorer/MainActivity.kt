@@ -7,16 +7,21 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.PersistableBundle
+import android.os.storage.StorageManager
+import android.os.storage.StorageVolume
 import android.provider.Settings
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.example.omni_explorer/settings"
     private val SECURITY_CHANNEL = "com.example.omni_explorer/security"
+    private val STORAGE_CHANNEL = "com.example.omni_explorer/storage"
 
     /** Libellé des copies faites par le coffre-fort (reconnaissance au nettoyage). */
     private val VAULT_CLIP_LABEL = "omni-vault"
@@ -33,6 +38,16 @@ class MainActivity: FlutterActivity() {
                     result.success(null)
                 } else {
                     result.notImplemented()
+                }
+            }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, STORAGE_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    // Volumes montés (stockage interne, cartes SD, clés et
+                    // disques USB) avec leur nom donné par le système.
+                    "getVolumes" -> result.success(storageVolumes())
+                    else -> result.notImplemented()
                 }
             }
 
@@ -95,6 +110,39 @@ class MainActivity: FlutterActivity() {
                 }
             }
     }
+
+    /** `null` avant Android 7 (pas d'API StorageVolume) : Dart se replie
+     *  sur path_provider et le parcours de /storage. */
+    private fun storageVolumes(): List<Map<String, Any?>>? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return null
+        val sm = getSystemService(Context.STORAGE_SERVICE) as StorageManager
+        return sm.storageVolumes.mapNotNull { v ->
+            val state = v.state
+            if (state != Environment.MEDIA_MOUNTED &&
+                state != Environment.MEDIA_MOUNTED_READ_ONLY) return@mapNotNull null
+            val dir = volumeDirectory(v) ?: return@mapNotNull null
+            mapOf(
+                "path" to dir.absolutePath,
+                "label" to v.getDescription(this),
+                "primary" to v.isPrimary,
+                "removable" to v.isRemovable,
+                "readOnly" to (state == Environment.MEDIA_MOUNTED_READ_ONLY),
+                "uuid" to v.uuid,
+            )
+        }
+    }
+
+    private fun volumeDirectory(v: StorageVolume): File? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            v.directory
+        } else {
+            // API 24–29 : méthode masquée mais présente sur tous les appareils.
+            try {
+                v.javaClass.getMethod("getPathFile").invoke(v) as? File
+            } catch (e: Exception) {
+                null
+            }
+        }
 
     private fun clipboard(): ClipboardManager =
         getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
