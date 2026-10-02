@@ -46,12 +46,9 @@ void main() {
     await tester.pump();
 
     expect(find.text('OmniExplorer'), findsOneWidget);
-    for (final title in [
-      'Explorateur',
-      'Images',
-      'Lecteur multimédia',
-      'PDF'
-    ]) {
+    // Images, lecteur multimédia et PDF s'ouvrent depuis l'explorateur :
+    // plus de carte dédiée.
+    for (final title in ['Explorateur', 'Éditeur', 'Éditeur multimédia']) {
       expect(find.text(title), findsOneWidget, reason: 'carte « $title »');
     }
     // Les cartes du bas de la grille sont construites paresseusement :

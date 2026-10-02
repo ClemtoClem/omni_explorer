@@ -1347,3 +1347,106 @@ création.
   reconnaît le nom de la catégorie).
 - Les formats ne sont pas validés (IBAN, numéro de carte, dates) : ce sont
   des textes libres.
+
+### Supports de stockage, filtres des raccourcis, fichiers récents, corbeille du système
+
+**Problème**
+- **Supports de stockage :**
+  - sous Linux, seul le dossier personnel apparaissait ;
+  - sous Android, seuls le stockage interne et les cartes SD vus par
+    `path_provider` / `external_path` étaient détectés, sous des noms
+    génériques (« Carte SD 1 ») ;
+  - les clés USB OTG étaient souvent absentes.
+- **Raccourcis :** ils ouvraient un dossier, sans moyen de cibler des
+  fichiers (types, extensions, sous-dossiers, tri).
+- **Fichiers récents et corbeille :**
+  - les fichiers récents n'étaient accessibles que depuis le menu des
+    fonctionnalités ;
+  - la corbeille, une feuille modale propre à l'application, ne marchait
+    pas sous Linux : son initialisation échouait, faute de
+    `getExternalStorageDirectory`. Elle ignorait de toute façon la
+    corbeille du bureau.
+
+**Modifications**
+- `StorageDetector` (`core/services/storage_detector.dart`) :
+  - **Android** : volumes montés d'après `StorageManager` (nouveau canal
+    `com.example.omni_explorer/storage` dans `MainActivity`), avec le nom
+    donné par le système (« Carte SD SanDisk », « Clé USB… »), l'état
+    lecture seule, interne / SD / USB. Repli sur `path_provider` avant
+    Android 7, puis parcours de `/storage` pour les volumes que le système
+    ne liste pas. La dépendance `external_path` est retirée.
+  - **Linux** : dossier personnel, système (`/`), puis chaque système de
+    fichiers réel de `/proc/mounts` (partitions, disques, clés USB, cartes
+    SD, disques optiques, partages NFS / SMB / SSHFS). La nature d'un
+    support vient de sysfs (`/sys/class/block/…` passe par `usb`,
+    `mmcblk`…). Sont écartés : les snaps, `/boot`, les pseudo-systèmes, la
+    partition qui contient déjà le dossier personnel et les sous-volumes
+    d'un même périphérique.
+  - Page Stockage : une icône et un libellé par nature, le chemin et la
+    mention « lecture seule ». L'espace libre est lu en parallèle, avec 3 s
+    au maximum par support (un partage réseau injoignable ne bloque plus la
+    page). Un bouton « Actualiser les supports » est ajouté.
+- **Filtres des raccourcis** (`core/models/file_filter.dart`, éditeur de
+  raccourci, section « Filtres de recherche ») :
+  - critères : nom, types (catégories), extensions, recherche dans les
+    sous-dossiers, tri imposé (nom / date / taille / type, croissant ou
+    décroissant) ;
+  - le raccourci ouvre l'explorateur avec ces filtres appliqués ; une
+    pastille sur la tuile signale un raccourci filtré ;
+  - défauts des nouvelles installations : Images (photos de tous les
+    sous-dossiers, les plus récentes d'abord), Vidéos, Musique (par type),
+    Téléchargements (plus récent d'abord).
+- **Explorateur** :
+  - la barre de filtres gagne « Sous-dossiers » et « Extensions… », et
+    reflète le filtre ouvert ;
+  - la recherche dans les sous-dossiers parcourt l'arborescence en tâche de
+    fond : résultats au fil de l'eau, fichiers cachés exclus sauf réglage
+    contraire, dossiers illisibles ignorés, 2 000 résultats au plus (limite
+    signalée) ;
+  - chaque résultat indique son dossier, et le menu de tri reprend la main
+    sur le tri imposé.
+- **Fichiers récents** : bouton dans la barre de la page Stockage.
+- **Corbeille** :
+  - nouvel écran `TrashScreen`, qui remplace la feuille modale : recherche,
+    restauration, suppression définitive, vidage, actualisation ;
+  - sous Linux, `TrashService` utilise la **corbeille du système**
+    (`XdgTrash`, spécification freedesktop.org), partagée avec Nautilus,
+    Dolphin ou `gio trash` : `~/.local/share/Trash` pour le dossier
+    personnel, `<disque>/.Trash-<uid>` (ou `.Trash/<uid>`) pour un autre
+    disque, sans copie d'un disque à l'autre ;
+  - tout ce que les autres logiciels y ont mis est listé ; un contenu sans
+    description apparaît comme orphelin ;
+  - le dossier `info/` est surveillé, donc une mise à la corbeille faite
+    depuis le bureau apparaît sans relancer l'application ;
+  - Android garde la corbeille de l'application.
+
+**Validation**
+- 34 nouveaux tests :
+  - détection (7) : un `/proc/mounts` complet (exclusions, doublons,
+    natures, espaces encodés), volumes Android ;
+  - filtres (6) ;
+  - recherche dans les sous-dossiers (6) : extensions, fichiers cachés,
+    tri imposé, retour au dossier, dossier illisible, plafond ;
+  - corbeille du système (11) : format `.trashinfo`, noms en conflit,
+    éléments ajoutés par un autre logiciel, orphelins, restauration avec
+    conflit, suppression, refus de la corbeille elle-même, corbeille d'un
+    autre disque, service complet, surveillance ;
+  - interface (4) : bouton « Fichiers récents », configuration des filtres
+    d'un raccourci, raccourci filtré qui ouvre sa recherche, écran de la
+    corbeille.
+- Tests adaptés : la page Stockage affiche plus de supports, donc les tests
+  amènent les raccourcis à l'écran avant de les toucher. Le test de
+  démarrage suit le nouveau menu (cartes Images, Lecteur et PDF retirées).
+- `flutter test` : 345 tests réussis. `flutter build apk --release` :
+  réussi (canal Kotlin compris). `flutter analyze lib test` : 0 erreur
+  dans le code modifié (les remarques restantes concernent
+  `feature_launcher_screen.dart` et `main.dart`, en cours de modification).
+
+**Limites et suite**
+- Android : sans « Accès à tous les fichiers », les volumes sont détectés
+  mais leur contenu n'est pas lisible.
+- Linux : `directorysizes` (cache des tailles de dossiers de la
+  spécification) n'est pas tenu à jour, et la taille d'un dossier en
+  corbeille n'est pas calculée.
+- La recherche dans les sous-dossiers n'utilise pas d'index : elle reparcourt
+  l'arborescence à chaque modification du filtre.
