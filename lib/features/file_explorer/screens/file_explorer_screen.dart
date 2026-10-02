@@ -29,7 +29,6 @@ import '../widgets/file_grid_item.dart';
 import '../widgets/path_bar.dart';
 import '../../../core/widgets/file_op_dialogs.dart';
 import '../widgets/filter_bar.dart';
-import '../widgets/shortcut_panel.dart';
 
 /// @class FileExplorerScreen
 /// @brief Écran principal de l'explorateur de fichiers.
@@ -40,9 +39,14 @@ class FileExplorerScreen extends StatefulWidget {
   /// filtre, tout est affiché.
   final Set<FileCategory> initialCategories;
 
+  /// Chemin à ouvrir directement au démarrage (prioritaire sur la
+  /// restauration de la dernière session).
+  final String? initialPath;
+
   const FileExplorerScreen({
     super.key,
     this.initialCategories = const {},
+    this.initialPath,
   });
 
   @override
@@ -53,7 +57,6 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     with WidgetsBindingObserver {
   late FileExplorerProvider _provider;
   late AppStateService _appState;
-  final _scaffoldKey = GlobalKey<ScaffoldState>();
   bool _showFilter = false;
 
   @override
@@ -78,20 +81,21 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
         return;
       }
       if (!mounted) return;
-      // Restaure le dernier chemin SI le dossier existe toujours et
-      // qu'il est différent de la racine. Une erreur ici ne doit jamais
-      // empêcher l'écran de fonctionner.
+
+      // Priorité 1 : chemin demandé (raccourci de StorageHomeScreen).
+      // Priorité 2 : dernier chemin visité.
+      final target = widget.initialPath ?? _appState.lastExplorerPath;
       try {
-        final saved = _appState.lastExplorerPath;
-        if (saved != null &&
-            saved.isNotEmpty &&
-            saved != _provider.currentPath &&
-            Directory(saved).existsSync()) {
-          await _provider.navigateTo(saved, addToHistory: false);
+        if (target != null &&
+            target.isNotEmpty &&
+            target != _provider.currentPath &&
+            Directory(target).existsSync()) {
+          await _provider.navigateTo(target, addToHistory: false);
         }
       } catch (e) {
         debugPrint('[FileExplorer] restore path failed: $e');
       }
+
       if (!mounted) return;
       if (widget.initialCategories.isNotEmpty) {
         _provider.setFilterCategories(widget.initialCategories);
@@ -130,44 +134,37 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       value: _provider,
       child: Consumer<FileExplorerProvider>(
         builder: (context, prov, _) => Scaffold(
-          key: _scaffoldKey,
           backgroundColor: Theme.of(context).scaffoldBackgroundColor,
           appBar: _buildAppBar(context, prov),
-          drawer: ShortcutPanel(
-            onNavigate: (path) {
-              _scaffoldKey.currentState?.closeDrawer();
-              prov.navigateTo(path);
-            },
-          ),
           body: Column(
             children: [
               PathBar(
-                currentPath:  prov.currentPath,
-                rootPath:     prov.rootPath,
-                onNavigate:   prov.navigateTo,
+                currentPath: prov.currentPath,
+                rootPath: prov.rootPath,
+                onNavigate: prov.navigateTo,
                 onSegmentTap: prov.navigateToSegment,
-                onUp:   prov.isAtRoot ? null : prov.navigateUp,
+                onUp: prov.isAtRoot ? null : prov.navigateUp,
                 onUndo: prov.canUndo ? prov.undo : null,
                 onRedo: prov.canRedo ? prov.redo : null,
               ),
-              if (!kIsWeb && Platform.isAndroid &&
+              if (!kIsWeb &&
+                  Platform.isAndroid &&
                   prov.needsFullStoragePermission)
                 _buildPermissionBanner(),
               if (_showFilter)
                 FilterBar(
-                  query:               prov.filterQuery,
-                  selectedCategories:  prov.filterCategories,
-                  onQueryChanged:      prov.setFilterQuery,
-                  onCategoryToggled:   prov.toggleFilterCategory,
-                  onClear:             prov.clearFilter,
+                  query: prov.filterQuery,
+                  selectedCategories: prov.filterCategories,
+                  onQueryChanged: prov.setFilterQuery,
+                  onCategoryToggled: prov.toggleFilterCategory,
+                  onClear: prov.clearFilter,
                 ),
               const Divider(height: 1),
               Expanded(child: _buildBody(context, prov)),
             ],
           ),
-          bottomNavigationBar: prov.selectMode
-              ? _buildSelectionBar(context, prov)
-              : null,
+          bottomNavigationBar:
+              prov.selectMode ? _buildSelectionBar(context, prov) : null,
         ),
       ),
     );
@@ -180,17 +177,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
 
     return AppBar(
       toolbarHeight: 100, // augmente la hauteur
-      leading: Navigator.canPop(context)
-          ? IconButton(
-              icon: const Icon(Icons.arrow_back_rounded),
-              tooltip: 'Retour',
-              onPressed: () => Navigator.maybePop(context),
-            )
-          : IconButton(
-              icon: const Icon(Icons.menu_rounded),
-              onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-              tooltip: 'Raccourcis',
-            ),
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back_rounded),
+        tooltip: 'Retour',
+        onPressed: () => Navigator.maybePop(context),
+      ),
       title: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisAlignment: MainAxisAlignment.center,
@@ -201,18 +192,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                 : 'Explorateur',
             style: const TextStyle(fontSize: 20),
           ),
-
           const SizedBox(height: 8),
-
           SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
-                IconButton(
-                  icon: const Icon(Icons.bookmark_outline_rounded),
-                  tooltip: 'Raccourcis',
-                  onPressed: () => _scaffoldKey.currentState?.openDrawer(),
-                ),
                 IconButton(
                   icon: Icon(_showFilter
                       ? Icons.filter_list_off
@@ -246,15 +230,13 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                   tooltip: settings.showHidden
                       ? 'Masquer les fichiers cachés'
                       : 'Afficher les fichiers cachés',
-                  onPressed: () =>
-                      settings.setShowHidden(!settings.showHidden),
+                  onPressed: () => settings.setShowHidden(!settings.showHidden),
                 ),
                 if (!prov.selectMode)
                   IconButton(
-                    icon: const Icon(Icons.add_rounded),
-                    tooltip: "Nouveau",
-                    onPressed: () => _showNewItemDialog(context, prov)
-                  ),
+                      icon: const Icon(Icons.add_rounded),
+                      tooltip: "Nouveau",
+                      onPressed: () => _showNewItemDialog(context, prov)),
                 if (!prov.selectMode && prov.hasClipboard)
                   IconButton(
                     icon: Badge(
@@ -263,9 +245,8 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                           ? Icons.content_paste_go_rounded
                           : Icons.content_paste_rounded),
                     ),
-                    tooltip: prov.clipboardIsCut
-                        ? 'Déplacer ici'
-                        : 'Coller ici',
+                    tooltip:
+                        prov.clipboardIsCut ? 'Déplacer ici' : 'Coller ici',
                     onPressed: () => _pasteHere(context, prov),
                   ),
               ],
@@ -301,7 +282,9 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
             children: [
               Icon(
                 settings.sortMode == m
-                    ? (settings.sortAsc ? Icons.arrow_upward : Icons.arrow_downward)
+                    ? (settings.sortAsc
+                        ? Icons.arrow_upward
+                        : Icons.arrow_downward)
                     : Icons.sort,
                 size: 16,
               ),
@@ -334,12 +317,12 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       itemBuilder: (_, i) {
         final item = prov.entries[i];
         return FileListItem(
-          item:        item,
-          isSelected:  prov.selected.contains(item.path),
-          selectMode:  prov.selectMode,
-          onTap:       () => _onItemTap(context, item, prov),
+          item: item,
+          isSelected: prov.selected.contains(item.path),
+          selectMode: prov.selectMode,
+          onTap: () => _onItemTap(context, item, prov),
           onLongPress: () => _onItemLongPress(item, prov),
-          onSelect:    () => prov.toggleSelect(item.path),
+          onSelect: () => prov.toggleSelect(item.path),
         );
       },
     );
@@ -348,27 +331,27 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
   Widget _buildGrid(BuildContext context, FileExplorerProvider prov) {
     return LayoutBuilder(
       builder: (context, constraints) => GridView.builder(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.all(8),
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount:   gridColumnsFor(constraints.maxWidth),
-        childAspectRatio: 0.85,
-        crossAxisSpacing: 8,
-        mainAxisSpacing:  8,
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.all(8),
+        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: gridColumnsFor(constraints.maxWidth),
+          childAspectRatio: 0.85,
+          crossAxisSpacing: 8,
+          mainAxisSpacing: 8,
+        ),
+        itemCount: prov.entries.length,
+        itemBuilder: (_, i) {
+          final item = prov.entries[i];
+          return FileGridItem(
+            item: item,
+            isSelected: prov.selected.contains(item.path),
+            selectMode: prov.selectMode,
+            onTap: () => _onItemTap(context, item, prov),
+            onLongPress: () => _onItemLongPress(item, prov),
+            onSelect: () => prov.toggleSelect(item.path),
+          );
+        },
       ),
-      itemCount: prov.entries.length,
-      itemBuilder: (_, i) {
-        final item = prov.entries[i];
-        return FileGridItem(
-          item:        item,
-          isSelected:  prov.selected.contains(item.path),
-          selectMode:  prov.selectMode,
-          onTap:       () => _onItemTap(context, item, prov),
-          onLongPress: () => _onItemLongPress(item, prov),
-          onSelect:    () => prov.toggleSelect(item.path),
-        );
-      },
-    ),
     );
   }
 
@@ -384,8 +367,9 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           Text(
             'Répertoire vide',
             style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: Theme.of(context).iconTheme.color?.withValues(alpha: 0.5),
-            ),
+                  color:
+                      Theme.of(context).iconTheme.color?.withValues(alpha: 0.5),
+                ),
           ),
         ],
       ),
@@ -400,8 +384,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.error_outline_rounded,
-                size: 56,
-                color: AppColors.error.withValues(alpha: 0.7)),
+                size: 56, color: AppColors.error.withValues(alpha: 0.7)),
             const SizedBox(height: 12),
             Text(msg,
                 textAlign: TextAlign.center,
@@ -430,8 +413,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           onPressed: () async {
             // Ouvre directement la page « Modifier les paramètres système »
             // (ou la page de l'app si la perm n'est pas applicable).
-            final granted =
-                await PermissionsService.hasManageExternalStorage();
+            final granted = await PermissionsService.hasManageExternalStorage();
             if (!granted) await PermissionsService.openAppSettingsPage();
           },
           child: const Text('Autoriser'),
@@ -466,40 +448,48 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
             children: [
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.close_rounded, 'Désélect.', prov.clearSelection),
+                child: _selBtn(
+                    Icons.close_rounded, 'Désélect.', prov.clearSelection),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.select_all_rounded, 'Tout', prov.selectAll),
+                child:
+                    _selBtn(Icons.select_all_rounded, 'Tout', prov.selectAll),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.open_in_new_rounded, 'Ouvrir', () => _openSelected(ctx, prov)),
+                child: _selBtn(Icons.open_in_new_rounded, 'Ouvrir',
+                    () => _openSelected(ctx, prov)),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.copy_rounded, 'Copier', () => _copySelected(ctx, prov)),
+                child: _selBtn(Icons.copy_rounded, 'Copier',
+                    () => _copySelected(ctx, prov)),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.control_point_duplicate_rounded, 'Dupliquer',
-                    () => _duplicateSelected(prov)),
+                child: _selBtn(Icons.control_point_duplicate_rounded,
+                    'Dupliquer', () => _duplicateSelected(prov)),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.cut_rounded, 'Déplacer', () => _moveSelected(ctx, prov)),
+                child: _selBtn(Icons.cut_rounded, 'Déplacer',
+                    () => _moveSelected(ctx, prov)),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.delete_outline_rounded, 'Corbeille', () => _trashSelected(prov, trash)),
+                child: _selBtn(Icons.delete_outline_rounded, 'Corbeille',
+                    () => _trashSelected(prov, trash)),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.delete_forever_rounded, 'Supprimer', () => _deleteSelected(ctx, prov)),
+                child: _selBtn(Icons.delete_forever_rounded, 'Supprimer',
+                    () => _deleteSelected(ctx, prov)),
               ),
               SizedBox(
                 width: 58,
-                child: _selBtn(Icons.compress_rounded, 'Archiver', () => _compressSelected(ctx, prov)),
+                child: _selBtn(Icons.compress_rounded, 'Archiver',
+                    () => _compressSelected(ctx, prov)),
               ),
             ],
           ),
@@ -556,25 +546,23 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
         : null;
 
     // Tous les médias du dossier pour la lecture en séquence
-    final playlist =
-        (item.category == FileCategory.audio ||
-                item.category == FileCategory.video)
-            ? _provider.entries
-                .where((e) =>
-                    e.category == FileCategory.audio ||
-                    e.category == FileCategory.video)
-                .map((e) => e.path)
-                .toList()
-            : null;
+    final playlist = (item.category == FileCategory.audio ||
+            item.category == FileCategory.video)
+        ? _provider.entries
+            .where((e) =>
+                e.category == FileCategory.audio ||
+                e.category == FileCategory.video)
+            .map((e) => e.path)
+            .toList()
+        : null;
 
     FileOpener.open(ctx, item, allImages: allImages, playlist: playlist);
   }
 
   /// @brief Ouvre les fichiers sélectionnés via [FileOpener.openMany].
   void _openSelected(BuildContext ctx, FileExplorerProvider prov) {
-    final items = _provider.entries
-        .where((e) => prov.selected.contains(e.path))
-        .toList();
+    final items =
+        _provider.entries.where((e) => prov.selected.contains(e.path)).toList();
     if (items.isEmpty) return;
 
     prov.clearSelection();
@@ -607,8 +595,8 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
               child: const Text('Annuler')),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child:
-                const Text('Supprimer', style: TextStyle(color: AppColors.error)),
+            child: const Text('Supprimer',
+                style: TextStyle(color: AppColors.error)),
           ),
         ],
       ),
@@ -643,14 +631,14 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
 
   Future<void> _pasteHere(BuildContext ctx, FileExplorerProvider prov) async {
     final wasCut = prov.clipboardIsCut;
-    final report = await prov.pasteClipboard(
-        onConflict: askingConflictResolver(context));
+    final report =
+        await prov.pasteClipboard(onConflict: askingConflictResolver(context));
     if (!mounted) return;
-    showFileOpReport(context, report,
-        verb: wasCut ? 'déplacé(s)' : 'collé(s)');
+    showFileOpReport(context, report, verb: wasCut ? 'déplacé(s)' : 'collé(s)');
   }
 
-  Future<void> _compressSelected(BuildContext ctx, FileExplorerProvider prov) async {
+  Future<void> _compressSelected(
+      BuildContext ctx, FileExplorerProvider prov) async {
     final paths = prov.selected.toList();
     if (paths.isEmpty) return;
     final created = await showCompressDialog(
@@ -663,7 +651,6 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       prov.refresh();
     }
   }
-
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -741,9 +728,8 @@ class _NewItemSheetState extends State<_NewItemSheet> {
             controller: _ctrl,
             autofocus: true,
             decoration: InputDecoration(
-              hintText: _isDir
-                  ? 'Nom du dossier'
-                  : 'Nom du fichier (ex: script.py)',
+              hintText:
+                  _isDir ? 'Nom du dossier' : 'Nom du fichier (ex: script.py)',
               errorText: _error,
               errorMaxLines: 3,
             ),

@@ -16,6 +16,9 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
+    # Forks vendorisés (dependency_overrides) : leurs exemples ont leur propre
+    # pubspec, non résolu ici.
+    - packages/**
 include: package:flutter_lints/flutter.yaml
 
 linter:

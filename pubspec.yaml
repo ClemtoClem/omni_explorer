@@ -98,6 +98,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.14.4
 
 dependency_overrides:
   re_editor:
@@ -110,3 +111,9 @@ flutter:
   assets:
     - assets/icons/
     - assets/fonts/
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/icons/icon_512.png"
+  min_sdk_android: 21 # requis à partir de la version 0.11.0 du package

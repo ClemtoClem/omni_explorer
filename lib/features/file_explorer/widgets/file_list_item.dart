@@ -23,9 +23,9 @@ import 'file_properties_dialog.dart';
 /// @class FileListItem
 /// @brief Ligne de l'explorateur en vue liste.
 class FileListItem extends StatelessWidget {
-  final FileItem    item;
-  final bool        isSelected;
-  final bool        selectMode;
+  final FileItem item;
+  final bool isSelected;
+  final bool selectMode;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
   final VoidCallback onSelect;
@@ -42,9 +42,9 @@ class FileListItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme  = Theme.of(context);
-    final color  = FileUtils.colorOf(item.category);
-    final icon   = FileUtils.iconOf(item.category, path: item.path);
+    final theme = Theme.of(context);
+    final color = FileUtils.colorOf(item.category);
+    final icon = FileUtils.iconOf(item.category, path: item.path);
 
     return InkWell(
       onTap: onTap,
@@ -52,7 +52,7 @@ class FileListItem extends StatelessWidget {
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         color: isSelected
-            ? AppColors.accent.withValues(alpha:0.12)
+            ? AppColors.accent.withValues(alpha: 0.12)
             : Colors.transparent,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Row(
@@ -67,9 +67,13 @@ class FileListItem extends StatelessWidget {
                     duration: const Duration(milliseconds: 150),
                     child: isSelected
                         ? Icon(Icons.check_circle_rounded,
-                            color: AppColors.accent, size: 22, key: const ValueKey(true))
+                            color: AppColors.accent,
+                            size: 22,
+                            key: const ValueKey(true))
                         : Icon(Icons.radio_button_unchecked_rounded,
-                            color: theme.iconTheme.color, size: 22, key: const ValueKey(false)),
+                            color: theme.iconTheme.color,
+                            size: 22,
+                            key: const ValueKey(false)),
                   ),
                 ),
               ),
@@ -78,7 +82,7 @@ class FileListItem extends StatelessWidget {
               width: 36,
               height: 36,
               decoration: BoxDecoration(
-                color: color.withValues(alpha:0.12),
+                color: color.withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Icon(icon, color: color, size: 20),
@@ -150,8 +154,22 @@ class _ContextMenuBtn extends StatelessWidget {
       constraints: const BoxConstraints(minWidth: 220),
       onSelected: (action) => _handleAction(context, action),
       itemBuilder: (_) => [
-        const PopupMenuItem(value: _ContextAction.open,
+        const PopupMenuItem(
+            value: _ContextAction.open,
             child: _MenuItem(Icons.open_in_new_rounded, 'Ouvrir')),
+        // ── Dossier : proposer la création dedans ──────────────────────────
+        if (item.isDirectory) ...[
+          const PopupMenuItem(
+            value: _ContextAction.newFolder,
+            child:
+                _MenuItem(Icons.create_new_folder_rounded, 'Nouveau dossier'),
+          ),
+          const PopupMenuItem(
+            value: _ContextAction.newFile,
+            child: _MenuItem(Icons.note_add_rounded, 'Nouveau fichier'),
+          ),
+          const PopupMenuDivider(),
+        ],
         // ── Actions spécifiques aux archives ───────────────────────────────
         if (_isArchive) ...[
           const PopupMenuItem(
@@ -168,7 +186,8 @@ class _ContextMenuBtn extends StatelessWidget {
         if (_isMedia) ...[
           const PopupMenuItem(
             value: _ContextAction.addToPlaylist,
-            child: _MenuItem(Icons.playlist_add_rounded, 'Ajouter à la playlist'),
+            child:
+                _MenuItem(Icons.playlist_add_rounded, 'Ajouter à la playlist'),
           ),
           if (_isVideo)
             const PopupMenuItem(
@@ -177,25 +196,36 @@ class _ContextMenuBtn extends StatelessWidget {
             ),
           const PopupMenuDivider(),
         ],
-        const PopupMenuItem(value: _ContextAction.rename,
-            child: _MenuItem(Icons.drive_file_rename_outline_rounded, 'Renommer')),
-        const PopupMenuItem(value: _ContextAction.copy,
+        const PopupMenuItem(
+            value: _ContextAction.rename,
+            child:
+                _MenuItem(Icons.drive_file_rename_outline_rounded, 'Renommer')),
+        const PopupMenuItem(
+            value: _ContextAction.copy,
             child: _MenuItem(Icons.copy_rounded, 'Copier')),
-        const PopupMenuItem(value: _ContextAction.duplicate,
-            child: _MenuItem(Icons.control_point_duplicate_rounded, 'Dupliquer')),
-        const PopupMenuItem(value: _ContextAction.cut,
+        const PopupMenuItem(
+            value: _ContextAction.duplicate,
+            child:
+                _MenuItem(Icons.control_point_duplicate_rounded, 'Dupliquer')),
+        const PopupMenuItem(
+            value: _ContextAction.cut,
             child: _MenuItem(Icons.cut_rounded, 'Couper')),
         const PopupMenuItem(
           value: _ContextAction.compress,
           child: _MenuItem(Icons.compress_rounded, 'Compresser…'),
         ),
-        const PopupMenuItem(value: _ContextAction.shortcut,
-            child: _MenuItem(Icons.bookmark_add_outlined, 'Ajouter aux raccourcis')),
-        const PopupMenuItem(value: _ContextAction.properties,
+        const PopupMenuItem(
+            value: _ContextAction.shortcut,
+            child: _MenuItem(
+                Icons.bookmark_add_outlined, 'Ajouter aux raccourcis')),
+        const PopupMenuItem(
+            value: _ContextAction.properties,
             child: _MenuItem(Icons.info_outline_rounded, 'Propriétés…')),
         const PopupMenuDivider(),
-        const PopupMenuItem(value: _ContextAction.trash,
-            child: _MenuItem(Icons.delete_outline_rounded, 'Mettre à la corbeille',
+        const PopupMenuItem(
+            value: _ContextAction.trash,
+            child: _MenuItem(
+                Icons.delete_outline_rounded, 'Mettre à la corbeille',
                 color: AppColors.error)),
       ],
     );
@@ -203,9 +233,19 @@ class _ContextMenuBtn extends StatelessWidget {
 
   void _handleAction(BuildContext ctx, _ContextAction action) {
     switch (action) {
+      case _ContextAction.newFolder:
+        _createInside(ctx, isDir: true);
+        break;
+
+      case _ContextAction.newFile:
+        _createInside(ctx, isDir: false);
+        break;
+
       case _ContextAction.open:
-        Navigator.push(ctx, MaterialPageRoute(
-          builder: (_) => ArchiveScreen(archivePath: item.path)));
+        Navigator.push(
+            ctx,
+            MaterialPageRoute(
+                builder: (_) => ArchiveScreen(archivePath: item.path)));
         break;
 
       case _ContextAction.extractHere:
@@ -223,13 +263,15 @@ class _ContextMenuBtn extends StatelessWidget {
       case _ContextAction.addToPlaylist:
         ctx.read<MediaPlayerProvider>().addPathToPlaylist(item.path);
         ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('« ${item.name} » ajouté à la playlist')));
+            SnackBar(content: Text('« ${item.name} » ajouté à la playlist')));
         break;
 
       case _ContextAction.editVideo:
-        Navigator.push(ctx, MaterialPageRoute(
-          builder: (_) => VideoEditorScreen(file: File(item.path)),
-        ));
+        Navigator.push(
+            ctx,
+            MaterialPageRoute(
+              builder: (_) => VideoEditorScreen(file: File(item.path)),
+            ));
         break;
 
       case _ContextAction.rename:
@@ -239,7 +281,7 @@ class _ContextMenuBtn extends StatelessWidget {
       case _ContextAction.shortcut:
         ctx.read<SettingsService>().addShortcut(item.name, item.path);
         ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('Raccourci créé pour « ${item.name} »')));
+            SnackBar(content: Text('Raccourci créé pour « ${item.name} »')));
         break;
 
       case _ContextAction.trash:
@@ -248,8 +290,8 @@ class _ContextMenuBtn extends StatelessWidget {
 
       case _ContextAction.copy:
         ctx.read<FileExplorerProvider>().copyToClipboard([item.path]);
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('« ${item.name} » copié — collez-le ailleurs')));
+        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+            content: Text('« ${item.name} » copié — collez-le ailleurs')));
         break;
 
       case _ContextAction.duplicate:
@@ -258,8 +300,8 @@ class _ContextMenuBtn extends StatelessWidget {
 
       case _ContextAction.cut:
         ctx.read<FileExplorerProvider>().cutToClipboard([item.path]);
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('« ${item.name} » coupé — collez-le ailleurs')));
+        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+            content: Text('« ${item.name} » coupé — collez-le ailleurs')));
         break;
 
       case _ContextAction.properties:
@@ -268,8 +310,84 @@ class _ContextMenuBtn extends StatelessWidget {
     }
   }
 
+  Future<void> _createInside(BuildContext ctx, {required bool isDir}) async {
+    final name = await _promptNewName(ctx, isDir: isDir);
+    if (name == null || !ctx.mounted) return;
+    try {
+      const ops = FileOperationsService();
+      if (isDir) {
+        await ops.createDirectory(item.path, name);
+      } else {
+        await ops.createFile(item.path, name);
+      }
+      if (!ctx.mounted) return;
+      ctx.read<FileExplorerProvider>().refresh();
+      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+        content: Text(
+          '${isDir ? "Dossier" : "Fichier"} « $name » créé dans « ${item.name} »',
+        ),
+      ));
+    } on FileOpException catch (e) {
+      if (!ctx.mounted) return;
+      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+        content: Text(e.message),
+        backgroundColor: AppColors.error,
+      ));
+    }
+  }
+
+  Future<String?> _promptNewName(BuildContext ctx,
+      {required bool isDir}) async {
+    final ctrl = TextEditingController();
+    return showDialog<String>(
+      context: ctx,
+      builder: (dCtx) {
+        String? error;
+        return StatefulBuilder(
+          builder: (dCtx, setLocal) {
+            void submit() {
+              final name = ctrl.text.trim();
+              final invalid = FileNameValidator.validate(name);
+              if (invalid != null) {
+                setLocal(() => error = invalid);
+                return;
+              }
+              Navigator.pop(dCtx, name);
+            }
+
+            return AlertDialog(
+              title: Text(isDir ? 'Nouveau dossier' : 'Nouveau fichier'),
+              content: TextField(
+                controller: ctrl,
+                autofocus: true,
+                decoration: InputDecoration(
+                  labelText: isDir ? 'Nom du dossier' : 'Nom du fichier',
+                  hintText: isDir ? 'Mon dossier' : 'fichier.txt',
+                  errorText: error,
+                  errorMaxLines: 3,
+                ),
+                onChanged: (_) {
+                  if (error != null) setLocal(() => error = null);
+                },
+                onSubmitted: (_) => submit(),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dCtx),
+                  child: const Text('Annuler'),
+                ),
+                FilledButton(onPressed: submit, child: const Text('Créer')),
+              ],
+            );
+          },
+        );
+      },
+    ).whenComplete(ctrl.dispose);
+  }
+
   Future<void> _duplicate(BuildContext ctx) async {
-    final report = await ctx.read<FileExplorerProvider>().duplicate([item.path]);
+    final report =
+        await ctx.read<FileExplorerProvider>().duplicate([item.path]);
     if (ctx.mounted) showFileOpReport(ctx, report, verb: 'dupliqué(s)');
   }
 
@@ -281,8 +399,8 @@ class _ContextMenuBtn extends StatelessWidget {
       messenger.showSnackBar(SnackBar(
           content: Text('« ${item.name} » déplacé vers la corbeille')));
     } on FileOpException catch (e) {
-      messenger.showSnackBar(SnackBar(
-          content: Text(e.message), backgroundColor: AppColors.error));
+      messenger.showSnackBar(
+          SnackBar(content: Text(e.message), backgroundColor: AppColors.error));
     }
     await explorer.refresh();
   }
@@ -297,9 +415,8 @@ class _ContextMenuBtn extends StatelessWidget {
           SnackBar(content: Text('Extrait dans $dest${result.notes}')));
     } catch (e) {
       if (ctx.mounted) {
-        ScaffoldMessenger.of(ctx).showSnackBar(
-          SnackBar(content: Text('Erreur : $e'),
-              backgroundColor: AppColors.error));
+        ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(
+            content: Text('Erreur : $e'), backgroundColor: AppColors.error));
       }
     }
   }
@@ -316,7 +433,9 @@ class _ContextMenuBtn extends StatelessWidget {
           decoration: const InputDecoration(hintText: '/chemin/destination'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annuler')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annuler')),
           FilledButton(
             onPressed: () {
               final dest = ctrl.text.trim();
@@ -334,7 +453,8 @@ class _ContextMenuBtn extends StatelessWidget {
 
   void _showCompressDialog(BuildContext ctx) {
     final currentDir = p.dirname(item.path);
-    showCompressDialog(ctx,
+    showCompressDialog(
+      ctx,
       sourcePaths: [item.path],
       destDir: currentDir,
     ).then((created) {
@@ -353,14 +473,27 @@ class _ContextMenuBtn extends StatelessWidget {
 }
 
 enum _ContextAction {
-  open, rename, copy, duplicate, cut, trash, shortcut,
-  extractHere, extractTo, compress, addToPlaylist, properties, editVideo,
+  open,
+  rename,
+  copy,
+  duplicate,
+  cut,
+  trash,
+  shortcut,
+  extractHere,
+  extractTo,
+  compress,
+  addToPlaylist,
+  properties,
+  editVideo,
+  newFolder,
+  newFile,
 }
 
 class _MenuItem extends StatelessWidget {
   final IconData icon;
-  final String   label;
-  final Color?   color;
+  final String label;
+  final Color? color;
   const _MenuItem(this.icon, this.label, {this.color});
 
   @override

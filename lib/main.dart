@@ -24,6 +24,7 @@ import 'features/text_editor/screens/unified_editor_screen.dart';
 import 'features/media_player/providers/media_player_provider.dart';
 import 'features/password_vault/providers/vault_session.dart';
 import 'features/video_editor/services/video_export_service.dart';
+import 'features/file_explorer/screens/storage_home_screen.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
