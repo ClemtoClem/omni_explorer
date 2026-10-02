@@ -10,6 +10,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:omni_explorer/core/services/permissions_service.dart';
 import 'package:omni_explorer/core/utils/system_ui.dart';
+import 'package:path/path.dart' as p;
 import 'package:provider/provider.dart';
 
 import '../../../../core/utils/responsive.dart';
@@ -23,6 +24,7 @@ import '../../../core/services/settings_service.dart';
 import '../../../core/services/trash_service.dart';
 import '../../../core/utils/file_opener.dart';
 import '../../archive/screens/archive_screen.dart';
+import '../explorer_picker.dart';
 import '../providers/file_explorer_provider.dart';
 import '../widgets/file_list_item.dart';
 import '../widgets/file_grid_item.dart';
@@ -43,10 +45,16 @@ class FileExplorerScreen extends StatefulWidget {
   /// restauration de la dernière session).
   final String? initialPath;
 
+  /// Mode sélecteur : l'explorateur sert à choisir des fichiers, un dossier
+  /// ou un emplacement d'enregistrement, et renvoie la liste des chemins
+  /// choisis via `Navigator.pop`. Ouvert par [ExplorerPicker].
+  final ExplorerPickRequest? pick;
+
   const FileExplorerScreen({
     super.key,
     this.initialCategories = const {},
     this.initialPath,
+    this.pick,
   });
 
   @override
@@ -59,6 +67,13 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
   late AppStateService _appState;
   bool _showFilter = false;
 
+  /// Nom du fichier à écrire (mode sélecteur « enregistrer »).
+  late final TextEditingController _saveName =
+      TextEditingController(text: widget.pick?.fileName ?? '');
+  String? _saveError;
+
+  ExplorerPickRequest? get _pick => widget.pick;
+
   @override
   void initState() {
     super.initState();
@@ -66,7 +81,13 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     WidgetsBinding.instance.addObserver(this);
     _provider = FileExplorerProvider(context.read<SettingsService>());
     _appState = context.read<AppStateService>();
-    _provider.addListener(_persistPath);
+    final pick = _pick;
+    if (pick != null) {
+      _provider.setFileFilter(pick.accepts);
+    } else {
+      // Un sélecteur ne déplace pas la dernière position de l'explorateur.
+      _provider.addListener(_persistPath);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       try {
@@ -82,7 +103,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       }
       if (!mounted) return;
 
-      // Priorité 1 : chemin demandé (raccourci de StorageHomeScreen).
+      // Priorité 1 : chemin demandé (raccourci de StorageScreen).
       // Priorité 2 : dernier chemin visité.
       final target = widget.initialPath ?? _appState.lastExplorerPath;
       try {
@@ -114,6 +135,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     WidgetsBinding.instance.removeObserver(this);
     _provider.removeListener(_persistPath);
     _provider.dispose();
+    _saveName.dispose();
     super.dispose();
   }
 
@@ -163,8 +185,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
               Expanded(child: _buildBody(context, prov)),
             ],
           ),
-          bottomNavigationBar:
-              prov.selectMode ? _buildSelectionBar(context, prov) : null,
+          bottomNavigationBar: _pick != null
+              ? _buildPickBar(context, prov, _pick!)
+              : prov.selectMode
+                  ? _buildSelectionBar(context, prov)
+                  : null,
         ),
       ),
     );
@@ -178,8 +203,9 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     return AppBar(
       toolbarHeight: 100, // augmente la hauteur
       leading: IconButton(
-        icon: const Icon(Icons.arrow_back_rounded),
-        tooltip: 'Retour',
+        icon: Icon(
+            _pick != null ? Icons.close_rounded : Icons.arrow_back_rounded),
+        tooltip: _pick != null ? 'Annuler' : 'Retour',
         onPressed: () => Navigator.maybePop(context),
       ),
       title: Column(
@@ -189,7 +215,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           Text(
             prov.selectMode
                 ? '${prov.selected.length} sélectionné(s)'
-                : 'Explorateur',
+                : _pick?.title ?? 'Explorateur',
             style: const TextStyle(fontSize: 20),
           ),
           const SizedBox(height: 8),
@@ -237,7 +263,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                       icon: const Icon(Icons.add_rounded),
                       tooltip: "Nouveau",
                       onPressed: () => _showNewItemDialog(context, prov)),
-                if (!prov.selectMode && prov.hasClipboard)
+                if (_pick == null && !prov.selectMode && prov.hasClipboard)
                   IconButton(
                     icon: Badge(
                       label: Text('${prov.clipboardCount}'),
@@ -323,6 +349,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
           onTap: () => _onItemTap(context, item, prov),
           onLongPress: () => _onItemLongPress(item, prov),
           onSelect: () => prov.toggleSelect(item.path),
+          showActions: _pick == null,
         );
       },
     );
@@ -519,6 +546,11 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
   // ── Gestion des taps ───────────────────────────────────────────────────────
 
   void _onItemTap(BuildContext ctx, FileItem item, FileExplorerProvider prov) {
+    final pick = _pick;
+    if (pick != null) {
+      _onPickTap(item, prov, pick);
+      return;
+    }
     if (prov.selectMode) {
       prov.toggleSelect(item.path);
       return;
@@ -531,8 +563,176 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
   }
 
   void _onItemLongPress(FileItem item, FileExplorerProvider prov) {
+    final pick = _pick;
+    if (pick != null) {
+      if (!item.isDirectory && pick.allowMultiple) _togglePicked(item, prov);
+      return;
+    }
     prov.toggleSelectMode();
     prov.toggleSelect(item.path);
+  }
+
+  // ── Mode sélecteur ─────────────────────────────────────────────────────────
+
+  void _onPickTap(
+      FileItem item, FileExplorerProvider prov, ExplorerPickRequest pick) {
+    if (item.isDirectory) {
+      prov.navigateTo(item.path);
+      return;
+    }
+    switch (pick.mode) {
+      case ExplorerPickMode.files:
+        if (pick.allowMultiple) {
+          _togglePicked(item, prov);
+        } else {
+          Navigator.pop(context, [item.path]);
+        }
+      case ExplorerPickMode.save:
+        // Reprendre le nom d'un fichier existant (pour le remplacer).
+        setState(() {
+          _saveName.text = item.name;
+          _saveError = null;
+        });
+      case ExplorerPickMode.directory:
+        break;
+    }
+  }
+
+  void _togglePicked(FileItem item, FileExplorerProvider prov) {
+    if (!prov.selectMode) prov.toggleSelectMode();
+    prov.toggleSelect(item.path);
+  }
+
+  Widget _buildPickBar(
+      BuildContext ctx, FileExplorerProvider prov, ExplorerPickRequest pick) {
+    final Widget content;
+    switch (pick.mode) {
+      case ExplorerPickMode.files:
+        if (!pick.allowMultiple) return const SizedBox.shrink();
+        final count = prov.selected.length;
+        content = Row(
+          children: [
+            Expanded(
+              child: Text(
+                count == 0
+                    ? 'Touchez les fichiers à ajouter'
+                    : '$count fichier(s) sélectionné(s)',
+                style: Theme.of(ctx).textTheme.bodyMedium,
+              ),
+            ),
+            if (count > 0)
+              TextButton(
+                  onPressed: prov.clearSelection,
+                  child: const Text('Désélect.')),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: count == 0
+                  ? null
+                  : () => Navigator.pop(ctx, prov.selected.toList()),
+              child: const Text('Valider'),
+            ),
+          ],
+        );
+      case ExplorerPickMode.directory:
+        content = Row(
+          children: [
+            const Icon(Icons.folder_rounded, color: AppColors.colorFolder),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                p.basename(prov.currentPath),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(ctx).textTheme.bodyMedium,
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: prov.currentPath.isEmpty || prov.error != null
+                  ? null
+                  : () => Navigator.pop(ctx, [prov.currentPath]),
+              child: const Text('Choisir ce dossier'),
+            ),
+          ],
+        );
+      case ExplorerPickMode.save:
+        content = Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _saveName,
+                decoration: InputDecoration(
+                  isDense: true,
+                  labelText: 'Nom du fichier',
+                  errorText: _saveError,
+                  errorMaxLines: 2,
+                ),
+                onChanged: (_) {
+                  if (_saveError != null) setState(() => _saveError = null);
+                },
+                onSubmitted: (_) => _confirmSave(prov),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: FilledButton(
+                onPressed: prov.currentPath.isEmpty || prov.error != null
+                    ? null
+                    : () => _confirmSave(prov),
+                child: const Text('Enregistrer'),
+              ),
+            ),
+          ],
+        );
+    }
+    return SafeArea(
+      child: Material(
+        color: Theme.of(ctx).colorScheme.surface,
+        elevation: 4,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+              16, 10, 16, 10 + MediaQuery.of(ctx).viewInsets.bottom),
+          child: content,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmSave(FileExplorerProvider prov) async {
+    final name = _saveName.text.trim();
+    final invalid = FileNameValidator.validate(name);
+    if (invalid != null) {
+      setState(() => _saveError = invalid);
+      return;
+    }
+    final target = p.join(prov.currentPath, name);
+    if (FileSystemEntity.typeSync(target) == FileSystemEntityType.directory) {
+      setState(() => _saveError = 'Un dossier porte déjà ce nom');
+      return;
+    }
+    if (File(target).existsSync()) {
+      final replace = await showDialog<bool>(
+        context: context,
+        builder: (dCtx) => AlertDialog(
+          title: const Text('Remplacer le fichier ?'),
+          content: Text('« $name » existe déjà dans ce dossier.'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dCtx, false),
+                child: const Text('Annuler')),
+            TextButton(
+              onPressed: () => Navigator.pop(dCtx, true),
+              child: const Text('Remplacer',
+                  style: TextStyle(color: AppColors.error)),
+            ),
+          ],
+        ),
+      );
+      if (replace != true) return;
+    }
+    if (mounted) Navigator.pop(context, [target]);
   }
 
   /// @brief Ouvre un fichier via [FileOpener] avec les listes contextuelles.

@@ -2,7 +2,7 @@
 
 /// @file trash_sheet.dart
 /// @brief Feuille modale de gestion de la corbeille (restaurer / supprimer
-/// / vider). Partagée par StorageHomeScreen.
+/// / vider). Partagée par StorageScreen.
 
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;

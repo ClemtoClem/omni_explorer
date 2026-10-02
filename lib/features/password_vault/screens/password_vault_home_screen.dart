@@ -14,6 +14,7 @@ import '../models/vault_entry.dart';
 import '../models/vault_errors.dart';
 import '../providers/vault_session.dart';
 import '../services/vault_repository.dart';
+import '../services/vault_sort.dart';
 import '../widgets/vault_transfer_dialogs.dart';
 import 'vault_entry_screen.dart';
 
@@ -398,9 +399,53 @@ class _VaultListViewState extends State<_VaultListView> {
     super.dispose();
   }
 
-  void _open(VaultEntry? entry) {
+  void _open(VaultEntry entry) {
     Navigator.push(context,
         MaterialPageRoute(builder: (_) => VaultEntryScreen(entry: entry)));
+  }
+
+  /// Nouvelle entrée : choix de la catégorie, puis formulaire.
+  Future<void> _add() async {
+    final category = await showModalBottomSheet<VaultCategory>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sheetCtx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(sheetCtx).size.height * 0.75),
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text('Quel type d\'information ?',
+                    style: TextStyle(fontWeight: FontWeight.w600)),
+              ),
+              for (final c in VaultCategory.values)
+                ListTile(
+                  leading: _CategoryIcon(c),
+                  title: Text(c.label),
+                  subtitle: Text(
+                    c.fields
+                        .where((f) => f.key != 'notes')
+                        .map((f) => f.label)
+                        .join(', '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  onTap: () => Navigator.pop(sheetCtx, c),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (category == null || !mounted) return;
+    Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => VaultEntryScreen(category: category)));
   }
 
   Future<void> _copy(String value, String what) async {
@@ -416,13 +461,40 @@ class _VaultListViewState extends State<_VaultListView> {
   @override
   Widget build(BuildContext context) {
     final session = context.watch<VaultSession>();
-    final entries = session.entries.where((e) => e.matches(_query)).toList()
-      ..sort((a, b) => a.title.toLowerCase().compareTo(b.title.toLowerCase()));
+    final mode = session.sortMode;
+    final entries = sortVaultEntries(
+        session.entries.where((e) => e.matches(_query)), mode);
+
+    // Liste à plat : en-têtes de catégorie (tri par catégorie) et entrées.
+    final rows = <Object>[];
+    for (final e in entries) {
+      if (mode == VaultSortMode.category &&
+          (rows.isEmpty ||
+              (rows.last is VaultEntry &&
+                  (rows.last as VaultEntry).category != e.category))) {
+        rows.add(e.category);
+      }
+      rows.add(e);
+    }
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Coffre-fort'),
         actions: [
+          PopupMenuButton<VaultSortMode>(
+            tooltip: 'Trier',
+            icon: const Icon(Icons.sort_rounded),
+            initialValue: mode,
+            onSelected: session.setSortMode,
+            itemBuilder: (_) => [
+              for (final m in VaultSortMode.values)
+                CheckedPopupMenuItem(
+                  value: m,
+                  checked: m == mode,
+                  child: Text(m.label),
+                ),
+            ],
+          ),
           IconButton(
             tooltip: 'Verrouiller',
             icon: const Icon(Icons.lock_outline_rounded),
@@ -449,7 +521,7 @@ class _VaultListViewState extends State<_VaultListView> {
       ),
       floatingActionButton: FloatingActionButton(
         tooltip: 'Ajouter',
-        onPressed: () => _open(null),
+        onPressed: _add,
         child: const Icon(Icons.add_rounded),
       ),
       body: Column(
@@ -460,7 +532,7 @@ class _VaultListViewState extends State<_VaultListView> {
               controller: _search,
               decoration: const InputDecoration(
                 prefixIcon: Icon(Icons.search_rounded),
-                hintText: 'Rechercher (titre, identifiant, adresse)',
+                hintText: 'Rechercher (tag, catégorie, champs non secrets)',
               ),
               onChanged: (v) => setState(() => _query = v),
             ),
@@ -472,40 +544,94 @@ class _VaultListViewState extends State<_VaultListView> {
                         ? 'Aucune entrée. Ajoutez-en une avec +.'
                         : 'Aucun résultat.'))
                 : ListView.builder(
-                    itemCount: entries.length,
+                    padding: const EdgeInsets.only(bottom: 88),
+                    itemCount: rows.length,
                     itemBuilder: (_, i) {
-                      final e = entries[i];
-                      return ListTile(
-                        leading: const Icon(Icons.key_rounded),
-                        title: Text(e.title,
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: e.username.isEmpty
-                            ? null
-                            : Text(e.username,
-                                maxLines: 1, overflow: TextOverflow.ellipsis),
-                        onTap: () => _open(e),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (e.username.isNotEmpty)
-                              IconButton(
-                                tooltip: 'Copier l\'identifiant',
-                                icon: const Icon(Icons.person_outline_rounded),
-                                onPressed: () =>
-                                    _copy(e.username, 'Identifiant'),
-                              ),
-                            if (e.password.isNotEmpty)
-                              IconButton(
-                                tooltip: 'Copier le mot de passe',
-                                icon: const Icon(Icons.copy_rounded),
-                                onPressed: () =>
-                                    _copy(e.password, 'Mot de passe'),
-                              ),
-                          ],
-                        ),
-                      );
+                      final row = rows[i];
+                      if (row is VaultCategory) return _CategoryHeader(row);
+                      return _entryTile(
+                          row as VaultEntry,
+                          showCategory: mode != VaultSortMode.category);
                     },
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _entryTile(VaultEntry e, {required bool showCategory}) {
+    final c = e.category;
+    final summary = e.summary;
+    final secretField = c.secret == null ? null : c.field(c.secret!);
+    final summaryField = c.summary == null ? null : c.field(c.summary!);
+    final subtitle = [
+      if (showCategory) c.label,
+      if (summary.isNotEmpty) summary,
+    ].join(' · ');
+    return ListTile(
+      key: ValueKey(e.id),
+      leading: _CategoryIcon(c),
+      title: Text(e.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle.isEmpty
+          ? null
+          : Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+      onTap: () => _open(e),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (summary.isNotEmpty && summaryField != null)
+            IconButton(
+              tooltip: 'Copier : ${summaryField.label}',
+              icon: const Icon(Icons.person_outline_rounded),
+              onPressed: () => _copy(summary, summaryField.label),
+            ),
+          if (e.primarySecret.isNotEmpty && secretField != null)
+            IconButton(
+              tooltip: 'Copier : ${secretField.label}',
+              icon: const Icon(Icons.copy_rounded),
+              onPressed: () => _copy(e.primarySecret, secretField.label),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CategoryIcon extends StatelessWidget {
+  final VaultCategory category;
+  const _CategoryIcon(this.category);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 40,
+      height: 40,
+      decoration: BoxDecoration(
+        color: category.color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Icon(category.icon, color: category.color, size: 22),
+    );
+  }
+}
+
+class _CategoryHeader extends StatelessWidget {
+  final VaultCategory category;
+  const _CategoryHeader(this.category);
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      child: Row(
+        children: [
+          Icon(category.icon, size: 16, color: category.color),
+          const SizedBox(width: 8),
+          Text(
+            category.label.toUpperCase(),
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                color: category.color, fontWeight: FontWeight.w700),
           ),
         ],
       ),

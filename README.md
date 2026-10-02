@@ -10,7 +10,11 @@ Application Android tout-en-un combinant :
   - Bouton remonter (↑), undo (←), redo (→)
   - Chaque segment est un bouton cliquable
   - Double-clic pour editer le chemin manuellement
-- Raccourcis vers : Telechargements, Images, Videos, Musique, Documents, Captures
+- Raccourcis de répertoire personnalisables sur la page Stockage (ajout,
+  modification du nom, du répertoire, de l'icône et de la couleur, ordre,
+  retrait)
+- Sert aussi de sélecteur (fichier, fichiers, dossier, enregistrement) pour
+  toutes les autres fonctionnalités
 - Filtres par nom et par categorie de fichier
 - Tri par nom, date, taille, type
 - Vue liste et vue grille
@@ -18,7 +22,7 @@ Application Android tout-en-un combinant :
 - Affichage de la date de modification et de la taille
 - Selection multiple avec actions groupees (copier, deplacer, corbeille, supprimer)
 - Gestion de la corbeille (avec restauration et vidage)
-- Creation de raccourcis
+- Creation de raccourcis (dossiers)
 - Affichage/masquage des fichiers caches
 
 ### Lecteur Audio/Video
@@ -1176,3 +1180,88 @@ création.
 - Ouvrir un fichier contenu dans l'archive sans l'extraire n'est pas encore
   possible (seules les actions d'extraction le permettent).
 - 7z et RAR restent en lecture seule, et sous Linux uniquement.
+
+### Explorateur unique pour la navigation et raccourcis personnalisables
+
+**Problème**
+- Plusieurs fonctionnalités naviguaient dans les répertoires sans passer par
+  l'explorateur de l'application :
+  - l'éditeur multimédia (éditer une vidéo, un audio ou une image ;
+    assembler des clips), via le sélecteur système de `file_picker` ;
+  - les archives (ajouter des fichiers ou un dossier, mettre à jour depuis
+    un dossier, extraire vers…), via le même sélecteur ;
+  - le coffre-fort (export et import), via le même sélecteur ;
+  - l'ancien éditeur de texte (`text_editor_screen.dart`, plus importé
+    nulle part), via son propre navigateur de dossiers `_FolderPickerSheet`.
+- L'explorateur ramenait tout chemin hors du stockage interne à sa racine :
+  le bouton « Explorer » d'une carte SD ouvrait le stockage interne.
+- Les raccourcis de la page Stockage n'étaient pas modifiables, et les
+  « Favoris » (ajoutés depuis l'explorateur) avaient tous la même icône.
+- Sous Linux, la page Stockage était vide (aucun stockage détecté).
+
+**Modifications**
+- `ExplorerPicker` (`features/file_explorer/explorer_picker.dart`) ouvre
+  `FileExplorerScreen` en mode sélecteur : `pickFile`, `pickFiles`,
+  `pickDirectory`, `saveFile`. Le mode sélecteur garde la navigation de
+  l'explorateur (barre de chemin, tri, filtres, fichiers cachés, cartes SD).
+  Il masque les fichiers refusés (catégories, extensions), cache le menu
+  contextuel et le collage, et affiche une barre de validation en bas
+  (« Valider », « Choisir ce dossier », ou un nom de fichier avec
+  « Enregistrer »). Le remplacement d'un fichier existant est confirmé. Un
+  sélecteur ne modifie pas la dernière position mémorisée de l'explorateur.
+- Toutes les fonctionnalités citées plus haut utilisent `ExplorerPicker`. Le
+  coffre écrit maintenant son export de façon atomique sur Android aussi, et
+  l'import lit le fichier sur place (plus de copie dans le cache).
+  La dépendance `file_picker` est retirée.
+- Navigation entre stockages : les racines des stockages détectés (interne,
+  cartes SD) sont connues du provider. Un chemin situé sur une carte SD fait
+  basculer la racine sur cette carte, y compris avec Précédent / Suivant.
+- Raccourcis (page Stockage) : une seule grille « Raccourcis » remplace
+  « Favoris » et les raccourcis fixes. Les dossiers par défaut (Images,
+  Vidéos, Documents, Musique, Téléchargements, Apps, Tout) y sont ajoutés
+  une seule fois, devant les favoris existants. Ensuite, l'utilisateur les
+  gère :
+  - **ajouter** : bouton « + » ou case « Ajouter » ;
+  - **modifier** (appui long) : nom, répertoire (choisi dans
+    l'explorateur), icône (32 au choix), couleur (10 au choix), avec un
+    aperçu ;
+  - **déplacer** avant / après, et **retirer** (annulable).
+  Un raccourci dont le répertoire n'existe plus apparaît grisé et propose
+  « Modifier ». « Ajouter aux raccourcis » dans l'explorateur n'est plus
+  proposé que pour les dossiers ; un ancien favori pointant sur un fichier
+  ouvre son dossier.
+- `ShortcutItem` gagne une couleur (`color`, ARGB) et `copyWith`. Les
+  anciens favoris se relisent sans changement.
+- `SettingsService` : `updateShortcut`, `moveShortcut`,
+  `seedDefaultShortcuts`. `addShortcut` signale un doublon. Correction : la
+  relecture des raccourcis repartait de la liste précédente quand la
+  préférence était absente.
+- Linux : le dossier personnel sert d'espace de stockage principal (page
+  Stockage, raccourcis par défaut).
+
+**Validation**
+- 19 nouveaux tests :
+  - provider (5) : filtres du sélecteur (catégorie, extension sans tenir
+    compte de la casse, mode dossier) et bascule vers une carte SD, aller et
+    retour ;
+  - raccourcis dans `SettingsService` (5) : défauts ajoutés une seule fois,
+    doublons, modification persistée, déplacement aux bornes, relecture des
+    anciens favoris ;
+  - sélecteur, par l'interface (5) : fichier unique filtré, fichiers
+    multiples, dossier, annulation, enregistrement avec remplacement
+    confirmé ;
+  - page Stockage (4) : modifier l'icône et le nom, retirer puis annuler,
+    changer de répertoire en passant par l'explorateur, champs obligatoires
+    à l'ajout.
+- `flutter test` : 293 tests réussis. `flutter analyze lib test` : 0 erreur
+  (13 remarques préexistantes) ; `flutter build apk --release` :
+  réussi.
+
+**Limites et suite**
+- Sous Android, l'explorateur (donc le sélecteur) ne voit que ce que
+  permettent les autorisations de stockage. Sans « Accès à tous les
+  fichiers », un export du coffre ne peut pas être écrit hors des dossiers
+  autorisés.
+- À l'ouverture, l'explorateur affiche brièvement « Répertoire vide » avant
+  le premier chargement (défaut préexistant, visible aussi dans le
+  sélecteur).

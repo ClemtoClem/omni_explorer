@@ -16,6 +16,7 @@ class AppConstants {
   static const String prefSortAsc      = 'sort_asc';
   static const String prefShowHidden   = 'show_hidden';
   static const String prefShortcuts    = 'shortcuts';
+  static const String prefShortcutsSeeded = 'shortcuts_defaults_seeded';
   static const String prefBookmarks    = 'bookmarks';
   static const String prefRecentFiles  = 'recent_files';
   static const String prefPlaylistsKey = 'playlists';

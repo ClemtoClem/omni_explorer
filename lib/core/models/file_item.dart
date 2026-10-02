@@ -113,29 +113,49 @@ class ShortcutItem {
   final String  id;
   final String  name;
   final String  path;
+  /// Clé de l'icône dans le catalogue des raccourcis (`null` : icône dossier).
   final String? iconName;
+  /// Couleur ARGB de la tuile (`null` : couleur des dossiers).
+  final int?    colorValue;
 
   const ShortcutItem({
     required this.id,
     required this.name,
     required this.path,
     this.iconName,
+    this.colorValue,
   });
+
+  ShortcutItem copyWith({
+    String? name,
+    String? path,
+    String? iconName,
+    int? colorValue,
+  }) =>
+      ShortcutItem(
+        id: id,
+        name: name ?? this.name,
+        path: path ?? this.path,
+        iconName: iconName ?? this.iconName,
+        colorValue: colorValue ?? this.colorValue,
+      );
 
   // ── Sérialisation ──────────────────────────────────────────────────────────
 
   Map<String, dynamic> toMap() => {
-    'id':   id,
-    'name': name,
-    'path': path,
-    'icon': iconName,
+    'id':    id,
+    'name':  name,
+    'path':  path,
+    'icon':  iconName,
+    'color': colorValue,
   };
 
   factory ShortcutItem.fromMap(Map<String, dynamic> map) => ShortcutItem(
-    id:       map['id']   as String,
-    name:     map['name'] as String,
-    path:     map['path'] as String,
-    iconName: map['icon'] as String?,
+    id:         map['id']    as String,
+    name:       map['name']  as String,
+    path:       map['path']  as String,
+    iconName:   map['icon']  as String?,
+    colorValue: map['color'] as int?,
   );
 
   @override

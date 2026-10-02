@@ -3,12 +3,13 @@
 /// réorganisation, puis export via le démuxer concat de FFmpeg.
 
 import 'dart:io';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
+import '../../file_explorer/explorer_picker.dart';
 import '../services/export_service.dart';
 
 class VideoConcatScreen extends StatefulWidget {
@@ -25,16 +26,13 @@ class _VideoConcatScreenState extends State<VideoConcatScreen> {
   String? _error;
 
   Future<void> _pickClips() async {
-    final res = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      type: FileType.video,
+    final paths = await ExplorerPicker.pickFiles(
+      context,
+      title: 'Clips à assembler',
+      categories: {FileCategory.video},
     );
-    if (res == null) return;
-    setState(() {
-      _clips.addAll(res.files
-          .where((f) => f.path != null)
-          .map((f) => File(f.path!)));
-    });
+    if (paths.isEmpty || !mounted) return;
+    setState(() => _clips.addAll(paths.map(File.new)));
   }
 
   Future<void> _export() async {

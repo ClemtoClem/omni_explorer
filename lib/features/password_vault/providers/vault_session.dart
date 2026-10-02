@@ -15,6 +15,7 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sodium/sodium_sumo.dart';
 import 'package:uuid/uuid.dart';
 
@@ -24,6 +25,7 @@ import '../services/secure_clipboard.dart';
 import '../services/vault_merge.dart';
 import '../services/vault_crypto.dart';
 import '../services/vault_repository.dart';
+import '../services/vault_sort.dart';
 
 enum VaultStatus {
   /// Initialisation (chargement de libsodium, recherche du coffre).
@@ -83,12 +85,45 @@ class VaultSession extends ChangeNotifier with WidgetsBindingObserver {
 
   bool get hasBackup => _repo?.hasBackup ?? false;
 
+  // ── Tri de la liste ─────────────────────────────────────────────────────
+
+  static const _kSortMode = 'vault.sort_mode';
+  bool _disposed = false;
+  VaultSortMode _sortMode = VaultSortMode.tagAscending;
+
+  /// Tri de la liste des entrées (préférence non sensible, conservée hors
+  /// du coffre).
+  VaultSortMode get sortMode => _sortMode;
+
+  void setSortMode(VaultSortMode mode) {
+    if (mode == _sortMode) return;
+    _sortMode = mode;
+    notifyListeners();
+    unawaited(SharedPreferences.getInstance()
+        .then((prefs) => prefs.setString(_kSortMode, mode.key))
+        .catchError((Object _) => false));
+  }
+
+  Future<void> _loadSortMode() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final mode = VaultSortMode.byKey(prefs.getString(_kSortMode));
+      if (!_disposed && mode != _sortMode) {
+        _sortMode = mode;
+        notifyListeners();
+      }
+    } catch (_) {
+      // Préférences indisponibles : tri par défaut.
+    }
+  }
+
   // ── Cycle de vie ────────────────────────────────────────────────────────
 
   /// Charge libsodium et détecte le coffre (une seule fois).
   Future<void> ensureInitialized() => _initializing ??= _init();
 
   Future<void> _init() async {
+    unawaited(_loadSortMode());
     try {
       _repo = await _repositoryFactory();
       _status = _repo!.exists ? VaultStatus.locked : VaultStatus.absent;
@@ -119,6 +154,7 @@ class VaultSession extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _disposed = true;
     WidgetsBinding.instance.removeObserver(this);
     lock();
     clipboard.dispose();
@@ -179,19 +215,15 @@ class VaultSession extends ChangeNotifier with WidgetsBindingObserver {
   /// Ajoute une entrée et l'enregistre.
   Future<VaultEntry> addEntry({
     required String title,
-    String username = '',
-    String password = '',
-    String url = '',
-    String notes = '',
+    VaultCategory category = VaultCategory.website,
+    Map<String, String> fields = const {},
   }) async {
     final now = DateTime.now().toUtc();
     final entry = VaultEntry(
       id: _uuid.v4(),
       title: title,
-      username: username,
-      password: password,
-      url: url,
-      notes: notes,
+      category: category,
+      fields: fields,
       createdAt: now,
       updatedAt: now,
     );

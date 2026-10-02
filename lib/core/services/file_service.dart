@@ -94,6 +94,20 @@ class FileService {
       debugPrint('[FileService] Erreur stockages externes: $e');
     }
 
+    // ── Linux : pas de stockage « externe » Android, le dossier personnel
+    // sert d'espace principal (même racine que l'explorateur).
+    if (storages.isEmpty && Platform.isLinux) {
+      final home = Platform.environment['HOME'];
+      if (home != null && Directory(home).existsSync()) {
+        storages.add(StorageInfo(
+          path: home,
+          label: 'Dossier personnel',
+          isExternal: false,
+          isAvailable: true,
+        ));
+      }
+    }
+
     return storages;
   }
 

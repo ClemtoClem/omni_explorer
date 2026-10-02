@@ -16,7 +16,7 @@ import 'package:path/path.dart' as p;
 import 'package:flutter_highlight/flutter_highlight.dart';
 import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'package:flutter_highlight/themes/atom-one-light.dart';
-import '../../../core/services/file_service.dart';
+import '../../file_explorer/explorer_picker.dart';
 import '../../../core/services/settings_service.dart';
 import '../widgets/ssh_terminal_panel.dart';
 
@@ -655,22 +655,9 @@ class _TextEditorScreenState extends State<TextEditorScreen> {
 
   Future<void> _openProjectDialog(
       BuildContext context, TextEditorProvider provider) async {
-    // Utilise FileService pour lister les stockages
-    final fileService = FileService.instance;
-    final storages = await fileService.getAvailableStorages();
-    if (!context.mounted) return;
-
-    // Navigation simple pour choisir un dossier
-    await showModalBottomSheet(
-      context: context,
-      builder: (ctx) => _FolderPickerSheet(
-        storages: storages.map((s) => s.path).toList(),
-        onSelected: (path) {
-          provider.openProject(path);
-          Navigator.pop(ctx);
-        },
-      ),
-    );
+    final path = await ExplorerPicker.pickDirectory(context,
+        title: 'Répertoire du projet', initialPath: provider.projectPath);
+    if (path != null) await provider.openProject(path);
   }
 }
 
@@ -1162,89 +1149,6 @@ class _EmptyEditor extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-/// @class _FolderPickerSheet
-/// @brief Sélecteur simple de dossier pour ouvrir un projet.
-class _FolderPickerSheet extends StatefulWidget {
-  final List<String> storages;
-  final void Function(String) onSelected;
-  const _FolderPickerSheet(
-      {required this.storages, required this.onSelected});
-
-  @override
-  State<_FolderPickerSheet> createState() => _FolderPickerSheetState();
-}
-
-class _FolderPickerSheetState extends State<_FolderPickerSheet> {
-  String? _current;
-  List<FileSystemEntity> _entries = [];
-
-  @override
-  void initState() {
-    super.initState();
-    if (widget.storages.isNotEmpty) _navigate(widget.storages.first);
-  }
-
-  void _navigate(String path) async {
-    _current = path;
-    try {
-      final entries = await Directory(path).list().toList()
-        ..sort((a, b) {
-          final ad = a is Directory ? 0 : 1;
-          final bd = b is Directory ? 0 : 1;
-          if (ad != bd) return ad - bd;
-          return p.basename(a.path).compareTo(p.basename(b.path));
-        });
-      setState(() {
-        _entries = entries.whereType<Directory>().toList();
-      });
-    } catch (_) {}
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
-            children: [
-              const Icon(Icons.folder_open),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  _current ?? '',
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
-              TextButton(
-                onPressed:
-                    _current != null ? () => widget.onSelected(_current!) : null,
-                child: const Text('Ouvrir ici'),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-        Expanded(
-          child: ListView.builder(
-            itemCount: _entries.length,
-            itemBuilder: (ctx, i) {
-              final name = p.basename(_entries[i].path);
-              return ListTile(
-                leading:
-                    const Icon(Icons.folder, color: Color(0xFF89B4FA)),
-                title: Text(name, style: const TextStyle(fontSize: 13)),
-                onTap: () => _navigate(_entries[i].path),
-              );
-            },
-          ),
-        ),
-      ],
     );
   }
 }

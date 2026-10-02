@@ -3,10 +3,11 @@
 /// filmer, enregistrer un son, assembler des clips.
 
 import 'dart:io';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
+import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
+import '../../file_explorer/explorer_picker.dart';
 import 'audio_editor_screen.dart';
 import 'audio_record_screen.dart';
 import 'camera_capture_screen.dart';
@@ -19,15 +20,16 @@ class VideoEditorHomeScreen extends StatelessWidget {
 
   Future<void> _pickAndOpen(
     BuildContext ctx,
-    FileType type,
+    FileCategory category,
+    String title,
     Widget Function(File) builder,
   ) async {
-    final res = await FilePicker.platform.pickFiles(type: type);
-    if (res == null || res.files.single.path == null) return;
-    if (!ctx.mounted) return;
+    final path = await ExplorerPicker.pickFile(ctx,
+        title: title, categories: {category});
+    if (path == null || !ctx.mounted) return;
     Navigator.push(
       ctx,
-      MaterialPageRoute(builder: (_) => builder(File(res.files.single.path!))),
+      MaterialPageRoute(builder: (_) => builder(File(path))),
     );
   }
 
@@ -56,30 +58,28 @@ class VideoEditorHomeScreen extends StatelessWidget {
               title: 'Enregistrer un audio',
               subtitle: 'Micro → fichier .m4a éditable',
               onTap: () => _open(context, const AudioRecordScreen())),
-
           _group(context, 'ÉDITER'),
           _tile(context,
               icon: Icons.movie_creation_rounded,
               color: AppColors.colorVideo,
               title: 'Éditer une vidéo',
               subtitle: 'Trim, recadrage, rotation, cover, reverse, export',
-              onTap: () => _pickAndOpen(context, FileType.video,
-                  (f) => VideoEditorScreen(file: f))),
+              onTap: () => _pickAndOpen(context, FileCategory.video,
+                  'Vidéo à éditer', (f) => VideoEditorScreen(file: f))),
           _tile(context,
               icon: Icons.audiotrack_rounded,
               color: AppColors.colorAudio,
               title: 'Éditer un audio',
               subtitle: 'Découpage, volume, filtres (passe-bas/haut/bande)',
-              onTap: () => _pickAndOpen(context, FileType.audio,
-                  (f) => AudioEditorScreen(file: f))),
+              onTap: () => _pickAndOpen(context, FileCategory.audio,
+                  'Audio à éditer', (f) => AudioEditorScreen(file: f))),
           _tile(context,
               icon: Icons.image_rounded,
               color: AppColors.colorImage,
               title: 'Éditer une image',
               subtitle: 'Rotation, miroir, luminosité, contraste, saturation',
-              onTap: () => _pickAndOpen(context, FileType.image,
-                  (f) => ImageEditorScreen(file: f))),
-
+              onTap: () => _pickAndOpen(context, FileCategory.image,
+                  'Image à éditer', (f) => ImageEditorScreen(file: f))),
           _group(context, 'ASSEMBLER'),
           _tile(context,
               icon: Icons.playlist_play_rounded,
@@ -87,7 +87,6 @@ class VideoEditorHomeScreen extends StatelessWidget {
               title: 'Assembler plusieurs clips',
               subtitle: 'Ordonner et concaténer des vidéos',
               onTap: () => _open(context, const VideoConcatScreen())),
-
           const SizedBox(height: 20),
           Text(
             'Les exports sont écrits dans le dossier temporaire de '

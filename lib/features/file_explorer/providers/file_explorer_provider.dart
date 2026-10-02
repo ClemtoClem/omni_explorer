@@ -12,6 +12,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../../app/constants/app_constants.dart';
 import '../../../core/models/file_item.dart';
 import '../../../core/services/file_operations_service.dart';
+import '../../../core/services/file_service.dart';
 import '../../../core/services/settings_service.dart';
 import 'dart:developer' as developer;
 
@@ -28,6 +29,9 @@ class FileExplorerProvider extends ChangeNotifier {
   // ── État de navigation ────────────────────────────────────────────────────
   String       _currentPath  = '';
   String       _rootPath     = '/';     // Chemin minimum : bloque navigateUp()
+  /// Racines de tous les stockages accessibles (interne, cartes SD) : la
+  /// navigation peut passer de l'une à l'autre, [_rootPath] suit.
+  List<String>       _roots      = [];
   final List<String> _history    = [];   // Historique undo
   final List<String> _redoStack  = [];   // Pile redo
   List<FileItem>     _entries    = [];
@@ -43,6 +47,9 @@ class FileExplorerProvider extends ChangeNotifier {
   // ── Filtre ────────────────────────────────────────────────────────────────
   String        _filterQuery     = '';
   final Set<FileCategory> _filterCategories = <FileCategory>{};
+  /// Filtre imposé par le mode sélecteur : les fichiers refusés sont masqués
+  /// (les dossiers restent toujours visibles pour naviguer).
+  bool Function(FileItem)? _fileFilter;
 
   // ── Presse-papiers (copier / couper / coller) ─────────────────────────────
   final List<String> _clipboard = [];
@@ -94,6 +101,9 @@ class FileExplorerProvider extends ChangeNotifier {
 
     final list = _entries.where((f) {
       if (!_settings.showHidden && f.isHidden) return false;
+      if (!f.isDirectory && _fileFilter != null && !_fileFilter!(f)) {
+        return false;
+      }
       if (q != null && !f.name.toLowerCase().contains(q)) return false;
       if (_filterCategories.isNotEmpty &&
           !_filterCategories.contains(f.category)) {
@@ -131,6 +141,7 @@ class FileExplorerProvider extends ChangeNotifier {
     _needsFullStoragePermission =
         !await PermissionsService.hasManageExternalStorage();
     _rootPath = await _getRootPath();
+    _roots = await _getStorageRoots(_rootPath);
     await navigateTo(_rootPath, addToHistory: false);
     return result;
   }
@@ -192,13 +203,36 @@ class FileExplorerProvider extends ChangeNotifier {
     return dir.path;
   }
 
+  /// Racine principale suivie des autres stockages détectés (cartes SD).
+  Future<List<String>> _getStorageRoots(String primary) async {
+    final roots = <String>[primary];
+    try {
+      for (final s in await FileService.instance.getAvailableStorages()) {
+        if (s.isAvailable && !roots.contains(s.path)) roots.add(s.path);
+      }
+    } catch (e) {
+      developer.log('Storages unavailable: $e', name: 'FileExplorerProvider');
+    }
+    return roots;
+  }
+
+  /// Fixe les stockages sans passer par [init] (la détection dépend de la
+  /// plateforme) : le premier est la racine courante.
+  @visibleForTesting
+  void debugSetStorageRoots(List<String> roots) {
+    _roots = List.of(roots);
+    _rootPath = roots.first;
+  }
+
   // ── Navigation ────────────────────────────────────────────────────────────
 
   /// @brief Navigue vers un répertoire.
+  ///
+  /// Un chemin situé dans un autre stockage connu (carte SD) fait basculer
+  /// la racine sur ce stockage ; tout autre chemin hors racine est ramené à
+  /// la racine courante.
   Future<void> navigateTo(String path, {bool addToHistory = true}) async {
-    if (_rootPath.isNotEmpty && !_isAncestorOrEqual(_rootPath, path)) {
-      path = _rootPath;
-    }
+    path = _withinRoots(path);
     if (path == _currentPath) return;
     if (addToHistory && _currentPath.isNotEmpty) {
       _history.add(_currentPath);
@@ -220,6 +254,16 @@ class FileExplorerProvider extends ChangeNotifier {
     await navigateTo(dest);
   }
 
+  /// Ramène [path] dans un stockage autorisé, en basculant [_rootPath] sur
+  /// le stockage qui le contient le cas échéant.
+  String _withinRoots(String path) {
+    if (_rootPath.isEmpty || _isAncestorOrEqual(_rootPath, path)) return path;
+    final other = _roots.where((r) => _isAncestorOrEqual(r, path));
+    if (other.isEmpty) return _rootPath;
+    _rootPath = other.reduce((a, b) => a.length >= b.length ? a : b);
+    return path;
+  }
+
   bool _isAncestorOrEqual(String ancestor, String path) {
     if (ancestor == path) return true;
     final a = ancestor.endsWith('/') ? ancestor : '$ancestor/';
@@ -231,7 +275,7 @@ class FileExplorerProvider extends ChangeNotifier {
     if (!canUndo) return;
     _redoStack.add(_currentPath);
     final prev = _history.removeLast();
-    _currentPath = _isAncestorOrEqual(_rootPath, prev) ? prev : _rootPath;
+    _currentPath = _withinRoots(prev);
     _selected.clear();
     _selectMode = false;
     await _loadEntries();
@@ -242,7 +286,7 @@ class FileExplorerProvider extends ChangeNotifier {
     if (!canRedo) return;
     _history.add(_currentPath);
     final next = _redoStack.removeLast();
-    _currentPath = _isAncestorOrEqual(_rootPath, next) ? next : _rootPath;
+    _currentPath = _withinRoots(next);
     _selected.clear();
     _selectMode = false;
     await _loadEntries();
@@ -318,6 +362,13 @@ class FileExplorerProvider extends ChangeNotifier {
   /// Bascule une catégorie dans la sélection (ajout / retrait).
   void toggleFilterCategory(FileCategory cat) {
     if (!_filterCategories.remove(cat)) _filterCategories.add(cat);
+    _invalidateCache();
+    notifyListeners();
+  }
+
+  /// Fixe le filtre du mode sélecteur (`null` : aucun fichier masqué).
+  void setFileFilter(bool Function(FileItem)? filter) {
+    _fileFilter = filter;
     _invalidateCache();
     notifyListeners();
   }

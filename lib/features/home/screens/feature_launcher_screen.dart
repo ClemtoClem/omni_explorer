@@ -20,7 +20,7 @@ import '../../text_editor/screens/unified_editor_screen.dart';
 import '../../video_editor/screens/video_editor_home_screen.dart';
 import '../widgets/feature_card.dart';
 import 'recent_files_screen.dart';
-import '../../file_explorer/screens/storage_home_screen.dart';
+import '../../file_explorer/screens/storage_screen.dart';
 
 class FeatureLauncherScreen extends StatefulWidget {
   const FeatureLauncherScreen({super.key});
@@ -125,7 +125,7 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
     Widget? screen;
     switch (f) {
       case AppFeature.fileExplorer:
-        screen = const StorageHomeScreen();
+        screen = const StorageScreen();
         break;
       case AppFeature.images:
         // Inclut les dossiers pour pouvoir naviguer + filtre images.

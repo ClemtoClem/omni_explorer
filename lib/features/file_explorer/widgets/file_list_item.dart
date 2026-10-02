@@ -30,6 +30,10 @@ class FileListItem extends StatelessWidget {
   final VoidCallback onLongPress;
   final VoidCallback onSelect;
 
+  /// Affiche le menu contextuel (renommer, supprimer…). Désactivé en mode
+  /// sélecteur, où l'explorateur sert seulement à choisir.
+  final bool showActions;
+
   const FileListItem({
     super.key,
     required this.item,
@@ -38,6 +42,7 @@ class FileListItem extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     required this.onSelect,
+    this.showActions = true,
   });
 
   @override
@@ -116,7 +121,7 @@ class FileListItem extends StatelessWidget {
               ),
             ),
             // ── Menu contextuel ─────────────────────────────────────────────
-            if (!selectMode)
+            if (!selectMode && showActions)
               Theme(
                 data: Theme.of(context).copyWith(
                   materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
@@ -214,10 +219,11 @@ class _ContextMenuBtn extends StatelessWidget {
           value: _ContextAction.compress,
           child: _MenuItem(Icons.compress_rounded, 'Compresser…'),
         ),
-        const PopupMenuItem(
-            value: _ContextAction.shortcut,
-            child: _MenuItem(
-                Icons.bookmark_add_outlined, 'Ajouter aux raccourcis')),
+        if (item.isDirectory)
+          const PopupMenuItem(
+              value: _ContextAction.shortcut,
+              child: _MenuItem(
+                  Icons.bookmark_add_outlined, 'Ajouter aux raccourcis')),
         const PopupMenuItem(
             value: _ContextAction.properties,
             child: _MenuItem(Icons.info_outline_rounded, 'Propriétés…')),
@@ -279,9 +285,14 @@ class _ContextMenuBtn extends StatelessWidget {
         break;
 
       case _ContextAction.shortcut:
-        ctx.read<SettingsService>().addShortcut(item.name, item.path);
-        ScaffoldMessenger.of(ctx).showSnackBar(
-            SnackBar(content: Text('Raccourci créé pour « ${item.name} »')));
+        final messenger = ScaffoldMessenger.of(ctx);
+        ctx
+            .read<SettingsService>()
+            .addShortcut(item.name, item.path)
+            .then((added) => messenger.showSnackBar(SnackBar(
+                content: Text(added
+                    ? 'Raccourci créé pour « ${item.name} »'
+                    : '« ${item.name} » a déjà un raccourci'))));
         break;
 
       case _ContextAction.trash:

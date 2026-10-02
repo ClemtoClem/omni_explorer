@@ -373,6 +373,7 @@ class SettingsService extends ChangeNotifier {
   // ── Raccourcis ─────────────────────────────────────────────────────────────
 
   void _loadShortcuts() {
+    _shortcuts = [];
     final raw = _prefs.getString(AppConstants.prefShortcuts);
     if (raw == null) return;
     try {
@@ -389,9 +390,71 @@ class SettingsService extends ChangeNotifier {
     );
   }
 
-  Future<void> addShortcut(String name, String path) async {
-    if (_shortcuts.any((s) => s.path == path)) return;
-    _shortcuts.add(ShortcutItem(id: _uuid.v4(), name: name, path: path));
+  /// Vrai tant que les raccourcis par défaut n'ont jamais été proposés.
+  bool get needsDefaultShortcuts =>
+      !(_prefs.getBool(AppConstants.prefShortcutsSeeded) ?? false);
+
+  /// Ajoute une seule fois les raccourcis par défaut (Images, Vidéos…)
+  /// devant ceux de l'utilisateur. Une fois fait, l'utilisateur en garde la
+  /// maîtrise : un raccourci par défaut retiré ne revient pas. L'id des
+  /// [defaults] est ignoré (un id neuf est attribué).
+  Future<void> seedDefaultShortcuts(List<ShortcutItem> defaults) async {
+    if (!needsDefaultShortcuts) return;
+    final known = _shortcuts.map((s) => s.path).toSet();
+    _shortcuts = [
+      for (final d in defaults)
+        if (known.add(d.path))
+          ShortcutItem(
+            id: _uuid.v4(),
+            name: d.name,
+            path: d.path,
+            iconName: d.iconName,
+            colorValue: d.colorValue,
+          ),
+      ..._shortcuts,
+    ];
+    await _saveShortcuts();
+    await _prefs.setBool(AppConstants.prefShortcutsSeeded, true);
+    notifyListeners();
+  }
+
+  /// Ajoute un raccourci. Renvoie `false` si [path] en a déjà un.
+  Future<bool> addShortcut(String name, String path,
+      {String? iconName, int? colorValue}) async {
+    if (_shortcuts.any((s) => s.path == path)) return false;
+    _shortcuts.add(ShortcutItem(
+      id: _uuid.v4(),
+      name: name,
+      path: path,
+      iconName: iconName,
+      colorValue: colorValue,
+    ));
+    await _saveShortcuts();
+    notifyListeners();
+    return true;
+  }
+
+  /// Remplace le raccourci de même id. Renvoie `false` si un autre raccourci
+  /// pointe déjà sur le nouveau chemin.
+  Future<bool> updateShortcut(ShortcutItem updated) async {
+    final i = _shortcuts.indexWhere((s) => s.id == updated.id);
+    if (i < 0) return false;
+    if (_shortcuts.any((s) => s.id != updated.id && s.path == updated.path)) {
+      return false;
+    }
+    _shortcuts[i] = updated;
+    await _saveShortcuts();
+    notifyListeners();
+    return true;
+  }
+
+  /// Déplace un raccourci de [delta] positions (négatif : vers le début).
+  Future<void> moveShortcut(String id, int delta) async {
+    final i = _shortcuts.indexWhere((s) => s.id == id);
+    if (i < 0) return;
+    final j = (i + delta).clamp(0, _shortcuts.length - 1);
+    if (i == j) return;
+    _shortcuts.insert(j, _shortcuts.removeAt(i));
     await _saveShortcuts();
     notifyListeners();
   }

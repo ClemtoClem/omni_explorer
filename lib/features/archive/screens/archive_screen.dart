@@ -6,7 +6,6 @@
 
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 
@@ -14,6 +13,7 @@ import '../../../app/theme/app_theme.dart';
 import '../../../core/services/file_operations_service.dart';
 import '../../../core/utils/file_utils.dart';
 import '../../../core/widgets/file_op_dialogs.dart';
+import '../../file_explorer/explorer_picker.dart';
 import '../models/archive_entry.dart';
 import '../models/archive_tree.dart';
 import '../services/archive_document.dart';
@@ -133,18 +133,21 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
         if (r.failures.isNotEmpty) r.failures.join(' ; '),
       ].join(' · ');
 
+  /// Dossier qui contient l'archive : point de départ des sélecteurs.
+  String get _hostDir => p.dirname(widget.archivePath);
+
   Future<void> _addFiles() async {
-    final picked = await FilePicker.platform.pickFiles(allowMultiple: true);
-    final paths = picked?.files.map((f) => f.path).whereType<String>().toList();
-    if (paths == null || paths.isEmpty || !mounted) return;
+    final paths = await ExplorerPicker.pickFiles(context,
+        title: 'Fichiers à ajouter', initialPath: _hostDir);
+    if (paths.isEmpty || !mounted) return;
     final resolver = askingConflictResolver(context);
     await _edit((doc) async => _reportText(
         await doc.addFromDisk(paths, _dir, onConflict: resolver), 'ajouté(s)'));
   }
 
   Future<void> _addFolder() async {
-    final dir = await FilePicker.platform
-        .getDirectoryPath(dialogTitle: 'Dossier à ajouter');
+    final dir = await ExplorerPicker.pickDirectory(context,
+        title: 'Dossier à ajouter', initialPath: _hostDir);
     if (dir == null || !mounted) return;
     final resolver = askingConflictResolver(context);
     await _edit((doc) async => _reportText(
@@ -216,8 +219,8 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
   }
 
   Future<void> _sync() async {
-    final source = await FilePicker.platform
-        .getDirectoryPath(dialogTitle: 'Dossier source de la mise à jour');
+    final source = await ExplorerPicker.pickDirectory(context,
+        title: 'Dossier source de la mise à jour', initialPath: _hostDir);
     if (source == null || !mounted) return;
     final exclude = await _askExclusions(source);
     if (exclude == null) return;
@@ -232,9 +235,9 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
 
   Future<void> _extract(List<String> paths, {required bool here}) async {
     final dest = here
-        ? p.dirname(widget.archivePath)
-        : await FilePicker.platform
-            .getDirectoryPath(dialogTitle: 'Extraire vers…');
+        ? _hostDir
+        : await ExplorerPicker.pickDirectory(context,
+            title: 'Extraire vers…', initialPath: _hostDir);
     if (dest == null || !mounted) return;
     final resolver = askingConflictResolver(context);
     setState(() => _busy = true);
