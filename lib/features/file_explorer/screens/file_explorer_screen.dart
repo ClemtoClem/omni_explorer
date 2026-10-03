@@ -78,6 +78,9 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
       TextEditingController(text: widget.pick?.fileName ?? '');
   String? _saveError;
 
+  /// Collage en cours : bouton du pied de page désactivé.
+  bool _pasting = false;
+
   ExplorerPickRequest? get _pick => widget.pick;
 
   @override
@@ -209,7 +212,9 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
               ? _buildPickBar(context, prov, _pick!)
               : prov.selectMode
                   ? _buildSelectionBar(context, prov)
-                  : null,
+                  : prov.hasClipboard
+                      ? _buildPasteBar(context, prov)
+                      : null,
         ),
       ),
     );
@@ -283,18 +288,6 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
                       icon: const Icon(Icons.add_rounded),
                       tooltip: "Nouveau",
                       onPressed: () => _showNewItemDialog(context, prov)),
-                if (_pick == null && !prov.selectMode && prov.hasClipboard)
-                  IconButton(
-                    icon: Badge(
-                      label: Text('${prov.clipboardCount}'),
-                      child: Icon(prov.clipboardIsCut
-                          ? Icons.content_paste_go_rounded
-                          : Icons.content_paste_rounded),
-                    ),
-                    tooltip:
-                        prov.clipboardIsCut ? 'Déplacer ici' : 'Coller ici',
-                    onPressed: () => _pasteHere(context, prov),
-                  ),
               ],
             ),
           ),
@@ -506,7 +499,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
               SizedBox(
                 width: 58,
                 child: _selBtn(
-                    Icons.close_rounded, 'Désélect.', prov.clearSelection),
+                    Icons.close_rounded, 'Désélectionner', prov.clearSelection),
               ),
               SizedBox(
                 width: 58,
@@ -633,6 +626,81 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
     prov.toggleSelect(item.path);
   }
 
+  /// Pied de page du presse-papiers : rappelle ce qui attend d'être copié
+  /// ou déplacé, et le valide dans le dossier courant.
+  Widget _buildPasteBar(BuildContext ctx, FileExplorerProvider prov) {
+    final theme = Theme.of(ctx);
+    final cut = prov.clipboardIsCut;
+    final count = prov.clipboardCount;
+    final blocked = prov.pasteBlockReason;
+    final what =
+        count == 1 ? p.basename(prov.clipboard.first) : '$count éléments';
+    final here = prov.currentPath.isEmpty
+        ? ''
+        : p.basename(prov.currentPath).isEmpty
+            ? prov.currentPath
+            : p.basename(prov.currentPath);
+    return SafeArea(
+      child: Material(
+        color: theme.colorScheme.surface,
+        elevation: 4,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+          child: Row(
+            children: [
+              Icon(
+                cut ? Icons.drive_file_move_outline : Icons.file_copy_outlined,
+                color: AppColors.accent,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${cut ? 'Déplacer' : 'Copier'} $what',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodyMedium
+                          ?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    Text(
+                      blocked ?? 'vers « $here »',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                          color: blocked != null ? AppColors.error : null),
+                    ),
+                  ],
+                ),
+              ),
+              TextButton(
+                onPressed: _pasting ? null : prov.clearClipboard,
+                child: const Text('Annuler'),
+              ),
+              const SizedBox(width: 4),
+              FilledButton.icon(
+                onPressed: blocked != null || _pasting
+                    ? null
+                    : () => _pasteHere(ctx, prov),
+                icon: _pasting
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : Icon(cut
+                        ? Icons.content_paste_go_rounded
+                        : Icons.content_paste_rounded),
+                label: Text(cut ? 'Déplacer ici' : 'Copier ici'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildPickBar(
       BuildContext ctx, FileExplorerProvider prov, ExplorerPickRequest pick) {
     final Widget content;
@@ -653,7 +721,7 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
             if (count > 0)
               TextButton(
                   onPressed: prov.clearSelection,
-                  child: const Text('Désélect.')),
+                  child: const Text('Désélectionner')),
             const SizedBox(width: 8),
             FilledButton(
               onPressed: count == 0
@@ -860,9 +928,19 @@ class _FileExplorerScreenState extends State<FileExplorerScreen>
   }
 
   Future<void> _pasteHere(BuildContext ctx, FileExplorerProvider prov) async {
+    if (_pasting) return;
     final wasCut = prov.clipboardIsCut;
-    final report =
-        await prov.pasteClipboard(onConflict: askingConflictResolver(context));
+    setState(() => _pasting = true);
+    final FileOpReport report;
+    try {
+      report = await prov.pasteClipboard(
+          onConflict: askingConflictResolver(context));
+    } finally {
+      if (mounted) setState(() => _pasting = false);
+    }
+    // Copie réussie : le pied de page disparaît (un « couper » vide déjà le
+    // presse-papiers des éléments déplacés).
+    if (!wasCut && report.failures.isEmpty) prov.clearClipboard();
     if (!mounted) return;
     showFileOpReport(context, report, verb: wasCut ? 'déplacé(s)' : 'collé(s)');
   }

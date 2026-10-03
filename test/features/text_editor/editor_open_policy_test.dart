@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 
 import 'package:omni_explorer/features/text_editor/models/editor_view_mode.dart';
+import 'package:omni_explorer/features/text_editor/services/editor_encoding.dart';
 import 'package:omni_explorer/features/text_editor/services/editor_open_policy.dart';
 
 void main() {
@@ -86,6 +87,30 @@ void main() {
       final probe = await FileProbe.of(f.path);
       expect(probe.size, 10000);
       expect(probe.looksBinary, isFalse);
+      expect(probe.encoding, EditorEncoding.utf8);
+    });
+
+    test('Latin-1 : du texte, pas du binaire', () async {
+      final f = File(p.join(sandbox.path, 'vieux.txt'))
+        ..writeAsBytesSync(latin1.encode('Résumé des données\n' * 50));
+      final probe = await FileProbe.of(f.path);
+      expect(probe.looksBinary, isFalse);
+      expect(probe.encoding, EditorEncoding.windows1252);
+    });
+
+    test('UTF-16 avec BOM : du texte malgré les octets nuls', () async {
+      final f = File(p.join(sandbox.path, 'win.txt'))
+        ..writeAsBytesSync(EditorEncodingCodec.encode(
+            'Hello\r\nWorld', EditorEncoding.utf16Le));
+      final probe = await FileProbe.of(f.path);
+      expect(probe.looksBinary, isFalse);
+      expect(probe.encoding, EditorEncoding.utf16Le);
+    });
+
+    test('exécutable : toujours binaire', () async {
+      final f = File(p.join(sandbox.path, 'a.out'))
+        ..writeAsBytesSync([0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01, 0x01, 0x00]);
+      expect((await FileProbe.of(f.path)).looksBinary, isTrue);
     });
   });
 

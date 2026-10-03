@@ -655,7 +655,7 @@ Branche : `p0/atomic-writes`
 - Les autres liens physiques (« hard links ») vers un fichier gardent
   l'ancien contenu après une sauvegarde, et le propriétaire du fichier n'est
   pas conservé.
-- **Défaut découvert, à traiter en P1.2 (éditeur de code)** : à chaque
+- **Défaut découvert, corrigé en P1.2 passe 1** : à chaque
   ouverture d'un onglet de code, `CodeEditor.initState` déclenche une
   notification du contrôleur, et l'écouteur d'autocomplétion appelle alors
   `setState` pendant la construction de l'écran. En debug, cela produit une
@@ -742,7 +742,7 @@ Branche : `p0/open-size-limits`
 **Limites et suite**
 - Les fichiers texte en **Latin-1** ou en **UTF-16** sont vus comme binaires
   et s'ouvrent en hexadécimal (auparavant, ils ne s'ouvraient pas du tout).
-  La détection d'encodage est prévue avec l'éditeur de code (P1.2).
+  Corrigé en P1.2 passe 1 (détection d'encodage).
 - Un fichier à lignes géantes ne peut être vu qu'en hexadécimal. Une
   visionneuse texte en lecture seule, qui découpe les lignes pour
   l'affichage, serait plus utile (P2).
@@ -1450,3 +1450,271 @@ création.
   corbeille n'est pas calculée.
 - La recherche dans les sous-dossiers n'utilise pas d'index : elle reparcourt
   l'arborescence à chaque modification du filtre.
+
+### P1.2 (passe 1) : éditeur de code — cycle de vie, encodages, barre d'état, onglets
+
+**Problème**
+- À l'ouverture de chaque onglet de code, l'écouteur d'autocomplétion
+  appelait `setState` pendant la construction de l'écran : erreur rouge
+  en debug (défaut relevé en P0.5).
+- Pas de détection d'encodage : un fichier Latin-1 ou UTF-16 était pris
+  pour du binaire et ouvert en hexadécimal.
+- Modifications non sauvegardées perdues si le système tuait
+  l'application en arrière-plan.
+- Ni barre d'état (ligne, colonne, encodage, langage), ni « Aller à la
+  ligne », ni menu d'onglet (fermer les autres, à droite…), ni moyen de
+  changer le langage déduit de l'extension.
+
+**Modifications**
+- **Cycle de vie** : l'autocomplétion et la barre d'état appliquent leur
+  état au tour de boucle suivant (`Timer(Duration.zero)`, annulable), plus
+  jamais pendant la construction. La barre d'état a son propre
+  `ValueNotifier` : déplacer le curseur ne reconstruit qu'elle.
+- **Encodages** (`services/editor_encoding.dart`) :
+  - détection sur les 8 premiers Kio : BOM, UTF-16 sans BOM (parité des
+    octets nuls, testée avant l'UTF-8, avec un garde-fou contre les
+    entiers 16 bits des fichiers audio), UTF-8, sinon Windows-1252 ;
+  - `FileProbe` porte l'encodage, et « binaire » ne veut plus dire « pas
+    UTF-8 » : du Windows-1252 n'est binaire qu'avec un octet nul ou plus
+    de 1 % de caractères de contrôle ;
+  - lecture et sauvegarde (ouverture, retour depuis l'hexadécimal) dans
+    l'encodage du fichier. Le BOM est retiré du texte et réécrit. Si de
+    l'UTF-8 invalide apparaît après les 8 Kio analysés, le fichier est
+    relu en Windows-1252 avec un message. Un caractère absent de
+    Windows-1252 bloque la sauvegarde avec un message, et le fichier reste
+    intact.
+- **Brouillons** (`services/editor_drafts.dart`) : au passage en
+  arrière-plan (`hidden` / `paused`, pas `inactive`), chaque onglet
+  modifié est écrit dans le dossier de support de l'application. **Le
+  fichier de l'utilisateur n'est jamais modifié.** À la réouverture,
+  l'éditeur propose « Reprendre » ou « Abandonner », et prévient si le
+  fichier a changé sur le disque depuis. Le brouillon est effacé à la
+  sauvegarde et quand on abandonne.
+- **Barre d'état** (`widgets/editor_status_bar.dart`), hors mode
+  hexadécimal :
+  - « Ln, Col » : touche → « Aller à la ligne » ;
+  - langage : touche → choix du langage (passe en mode code depuis le
+    texte brut) ;
+  - nombre de lignes et de caractères (masqué si la place manque) ;
+  - encodage : touche → « Rouvrir avec » (onglet sans modification) ou
+    « Enregistrer avec ».
+- **Aller à la ligne** (`widgets/go_to_line_dialog.dart`) : bouton de la
+  barre d'application, Ctrl+G, ou la barre d'état ; numéro hors limites
+  signalé dans le dialogue.
+- **Onglets** (`widgets/editor_tab_bar.dart`) : appui long ou clic droit →
+  Fermer, Fermer les autres / à droite / à gauche, Fermer les non
+  modifiés, Tout fermer, Rouvrir le dernier fermé. Les fermetures en série
+  montrent chaque onglet modifié avant de demander, et « Annuler » arrête
+  la série. Une sauvegarde qui échoue à la fermeture laisse désormais
+  l'onglet ouvert (avant, il était fermé quand même).
+- **re_editor** (copie dans `packages/`) : le délai d'affichage du curseur
+  sur Android est annulable. Il se déclenchait après `dispose()` quand
+  l'éditeur était fermé dans les 100 ms suivant la prise de focus.
+
+**Validation**
+- 34 nouveaux tests :
+  - encodages et curseur (22) : détection, binaire 8 bits, allers-retours
+    dans chaque encodage, les 256 octets de Windows-1252, BOM ;
+  - `FileProbe` (3) : Latin-1 et UTF-16 lus comme du texte, exécutable
+    toujours binaire ;
+  - écran (9) : pas de « setState during build » à l'ouverture d'un
+    fichier de code (le test échoue sur l'ancien code), Latin-1 ouvert et
+    réenregistré, caractère non représentable refusé, UTF-16, barre
+    d'état, « Aller à la ligne », « Fermer les autres » puis « Rouvrir »,
+    « Tout fermer » interrompu, brouillon écrit puis repris.
+- Tests adaptés : le test hex → texte utilise un en-tête ELF (un début
+  `FF FE` est désormais lu comme un BOM UTF-16), et le test de sauvegarde
+  reconstruit l'écran explicitement (il comptait sur l'ancien `setState`
+  synchrone).
+- `flutter test` : 379 tests réussis. `flutter build apk --release` :
+  réussi. `flutter analyze` : aucune remarque
+  dans l'éditeur ni dans les tests (les 17 restantes sont antérieures,
+  surtout `feature_launcher_screen.dart` et `main.dart`, en cours de
+  modification).
+
+**Limites et suite**
+- Un UTF-16 sans BOM est réécrit avec BOM.
+- Le formatage du texte enrichi (`.fmt`) n'est pas inclus dans les
+  brouillons, et les brouillons ne sont écrits que si l'écran de l'éditeur
+  est ouvert.
+- Changer d'encodage ou de langage remet l'historique d'annulation à zéro.
+- Passe 2 : palette de commandes, recherche avancée (casse, mot entier,
+  regex, navigation), recherche dans le projet, préférences de l'éditeur à
+  chaud, nouveau fichier / enregistrer sous, position du curseur
+  conservée par onglet, découpage de `unified_editor_screen.dart` (le
+  fournisseur et l'arborescence d'abord), suppression du code mort
+  (`text_editor_screen.dart`, `project_tree.dart`).
+
+### P1.2 (passe 2) : éditeur de code — recherche, palette, lignes, fichiers
+
+**Problème**
+- La « recherche » ne cherchait rien : elle remplaçait la première
+  occurrence. Pas de casse, de mot entier, d'expression, de compteur ni de
+  navigation.
+- Pas de raccourcis (hors ceux de l'éditeur de code), ni d'opérations sur
+  les lignes au toucher.
+- L'éditeur ne pouvait ni créer un fichier, ni « enregistrer sous », ni
+  révéler le fichier dans l'explorateur. Pas de recherche dans le projet.
+- La police de code des Paramètres ne s'appliquait qu'à la réouverture de
+  l'éditeur, et le mode code n'affichait pas de numéros de ligne
+  (`showLineNumbers` était ignoré).
+- `unified_editor_screen.dart` faisait 2 800 lignes, à côté de deux
+  fichiers morts (`text_editor_screen.dart`, avec un second
+  `LanguageRegistry`, et `project_tree.dart`).
+- Le fournisseur n'était pas prévenu de l'ouverture ou de la fermeture des
+  onglets, donc les onglets mémorisés par le menu d'accueil pouvaient être
+  périmés.
+
+**Modifications**
+- **Découpage** :
+  - `models/editor_tab.dart` (onglet), `models/rich_text_controller.dart`,
+    `models/project_node.dart`, `providers/unified_editor_provider.dart`,
+    `services/code_ctrl_adapter.dart` ;
+  - classes rendues publiques (`EditorTab`, `RichTextController`…) ;
+  - l'écran réexporte le fournisseur, donc ses imports ailleurs ne
+    changent pas ;
+  - les deux fichiers morts sont supprimés.
+- **Recherche / remplacement** (`services/text_search.dart`,
+  `widgets/editor_search_bar.dart`), dans les modes code, texte et texte
+  enrichi :
+  - options : casse, mot entier (accents compris), expression régulière
+    (motif invalide signalé) ;
+  - compteur « 2/5 », précédent / suivant (Entrée, Maj+Entrée, F3) ;
+  - « Remplacer » et « Tout », avec `$1` / `${nom}` en mode expression ;
+  - le texte sélectionné devient le motif.
+
+  Le texte en lecture seule s'affiche dans un champ non modifiable, pour
+  que recherche et « Aller à la ligne » puissent y sélectionner.
+- **Opérations sur les lignes** (`services/line_operations.dart`) :
+  - commenter / décommenter avec la syntaxe du langage (`//`, `#`, `--`,
+    `<!-- -->`, `/* */`) ;
+  - dupliquer, monter, descendre, supprimer.
+
+  Elles sont dans le menu ⋮ (onglet en édition), la palette et au clavier.
+- **Palette de commandes** (`widgets/command_palette.dart`) : Ctrl+Maj+P ou
+  F1, ou menu ⋮. Recherche approximative sur toutes les actions de
+  l'éditeur, avec leurs raccourcis. En projet, Ctrl+P ouvre rapidement un
+  fichier du projet.
+- **Raccourcis** :
+
+  | Action | Raccourci |
+  | --- | --- |
+  | Sauvegarder / enregistrer sous | Ctrl+S / Ctrl+Maj+S |
+  | Nouveau fichier / ouvrir | Ctrl+N / Ctrl+O (Ctrl+P en projet) |
+  | Fermer l'onglet / rouvrir le dernier fermé | Ctrl+W / Ctrl+Maj+T |
+  | Onglet suivant / précédent | Ctrl+Tab / Ctrl+Maj+Tab |
+  | Rechercher / remplacer | Ctrl+F / Ctrl+H |
+  | Rechercher dans le projet | Ctrl+Maj+F |
+  | Aller à la ligne | Ctrl+G |
+  | Commenter les lignes | Ctrl+/ |
+  | Dupliquer / supprimer les lignes | Ctrl+Maj+D / Ctrl+Maj+K |
+  | Monter / descendre les lignes | Alt+↑ / Alt+↓ |
+
+  En mode code, les raccourcis d'enregistrement, de recherche et de
+  commentaire de l'éditeur sont redirigés vers ceux de l'écran (même
+  comportement partout). Ctrl+D garde son rôle dans l'éditeur de code
+  (supprimer la ligne).
+- **Recherche dans le projet** (`services/project_search.dart`,
+  `screens/project_search_screen.dart`) :
+  - mêmes options que la recherche ;
+  - résultats au fil de l'eau, groupés par fichier, avec la ligne et
+    l'occurrence surlignée. Toucher un résultat ouvre le fichier à
+    l'occurrence ;
+  - dossiers exclus du projet et éléments cachés ignorés, binaires et
+    fichiers de plus de 2 Mio sautés ;
+  - plafonds de 5 000 fichiers et 2 000 résultats, signalés ;
+  - les fichiers sont lus dans leur encodage.
+- **Fichiers** (menu ⋮ et palette), via l'explorateur :
+  - « Nouveau fichier… » : un fichier existant est ouvert, jamais vidé ;
+  - « Ouvrir… » ;
+  - « Enregistrer sous… » : le nouveau fichier prend la place de l'onglet,
+    l'original n'est pas modifié ; encodage et formatage enrichi sont
+    conservés ;
+  - « Révéler dans l'explorateur ».
+- **Barre d'application** : rechercher, sauvegarder, exécuter et mode
+  restent visibles. Le reste passe dans le menu ⋮ (palette, fichiers,
+  lignes, aller à la ligne, terminal, paramètres du projet), pour tenir sur
+  un téléphone.
+- **Divers** :
+  - police de code des Paramètres appliquée à chaud ;
+  - numéros de ligne en mode code, selon `showLineNumbers` ;
+  - position du curseur rétablie quand on rouvre un fichier pendant la
+    session ;
+  - le fournisseur prévient ses abonnés à chaque ouverture ou fermeture
+    d'onglet.
+
+**Validation**
+- 31 nouveaux tests :
+  - logique (19) : recherche (casse, mot entier accentué, caractères
+    spéciaux, expression invalide, groupes, remplacement littéral),
+    opérations sur les lignes (bornes, sélection finissant en début de
+    ligne, aller-retour du commentaire, HTML), palette, recherche dans le
+    projet (exclus, cachés, binaire sauté, Latin-1, ligne et colonne) ;
+  - écran (12) :
+    - recherche : compteur, navigation, casse, « Tout » ; expression
+      invalide ; Ctrl+F en code avec le mot sélectionné ;
+    - palette (Ctrl+Maj+P) puis « dupl » ;
+    - raccourcis de lignes ; Ctrl+/ en Python ; pas d'opération de ligne
+      en lecture seule ;
+    - curseur rétabli ; abonnés du fournisseur prévenus ; numéros de
+      ligne ;
+    - « Enregistrer sous » et « Nouveau fichier » de bout en bout dans
+      l'explorateur.
+- `flutter test` : 410 tests réussis. `flutter build apk --release` :
+  réussi. `flutter analyze` : aucune remarque dans l'éditeur ni dans les
+  tests (les 17 restantes sont antérieures).
+
+**Limites et suite**
+- Texte enrichi : remplacer ou déplacer des lignes ne décale pas les plages
+  de formatage. C'est le défaut existant de la saisie dans ce mode, qui ne
+  les décale pas non plus.
+- La recherche ne surligne que l'occurrence courante (pas toutes), et
+  l'historique d'annulation du mode code compte un remplacement ou une
+  opération de ligne comme un remplacement du texte entier.
+- La position du curseur n'est conservée que pendant la session.
+- Reste de la feuille de route :
+  - réglages de l'éditeur dans les Paramètres hors projet (retour à la
+    ligne, numéros de ligne, tabulation) ;
+  - panneau du projet en feuille coulissante sur petit écran ;
+  - poursuite du découpage de l'écran (vues hexadécimale et texte enrichi
+    en widgets).
+
+### Explorateur : pied de page pour valider une copie ou un déplacement
+
+**Problème**
+- Après « Copier » ou « Déplacer », rien ne rappelait ce qui attendait
+  d'être collé. Le seul moyen de valider était une petite icône à pastille
+  dans la barre d'outils, à faire défiler.
+- Coller un dossier dans lui-même, ou déplacer des éléments vers leur
+  propre dossier, n'était signalé qu'après coup.
+
+**Modifications**
+- Pied de page dans `FileExplorerScreen`, affiché tant que le
+  presse-papiers n'est pas vide (hors mode sélection et sélecteur) :
+  - il indique quoi (nom de l'élément ou « N éléments ») et vers quel
+    dossier ;
+  - bouton **« Copier ici » / « Déplacer ici »** et « Annuler », qui vide
+    le presse-papiers ;
+  - pendant l'opération, le bouton est désactivé et montre une
+    progression ;
+  - les conflits de noms passent par le dialogue habituel.
+- `FileExplorerProvider.pasteBlockReason` : le bouton est désactivé, avec
+  la raison en rouge, quand le dossier est inaccessible, qu'un dossier irait
+  dans lui-même ou dans un de ses sous-dossiers, ou qu'un déplacement vise
+  le dossier d'origine. Copier dans le même dossier reste possible : la
+  copie est créée à côté.
+- Une copie réussie ferme le pied de page. Avant, elle restait dans le
+  presse-papiers ; le fournisseur garde ce comportement pour les autres
+  appelants. Un déplacement ne garde que les éléments en échec, comme
+  avant.
+- L'icône de collage de la barre d'outils est retirée, car le pied de page
+  la remplace.
+
+**Validation**
+- 4 nouveaux tests :
+  - fournisseur : raisons de blocage ;
+  - écran : copier puis changer de dossier et « Copier ici » ; déplacement
+    bloqué dans le dossier d'origine puis validé ; « Annuler » avec un
+    dossier qui irait dans lui-même.
+- `flutter test` : 414 tests réussis. `flutter analyze` : aucune nouvelle
+  remarque.

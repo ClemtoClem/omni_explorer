@@ -62,6 +62,32 @@ void main() {
     expect(File(p.join(b, 'f.1.txt')).existsSync(), isTrue);
   });
 
+  test('collage possible ou non dans le dossier courant', () async {
+    File(p.join(a, 'f.txt')).writeAsStringSync('x');
+    await Directory(p.join(b, 'sous')).create();
+
+    expect(prov.pasteBlockReason, isNull); // presse-papiers vide
+
+    prov.copyToClipboard([p.join(a, 'f.txt')]);
+    expect(prov.pasteBlockReason, isNull);
+
+    // Déplacer vers le dossier d'origine : rien à faire.
+    await prov.navigateTo(a);
+    prov.cutToClipboard([p.join(a, 'f.txt')]);
+    expect(prov.pasteBlockReason, 'Déjà dans ce dossier');
+    // Copier dans le même dossier reste possible (copie à côté).
+    prov.copyToClipboard([p.join(a, 'f.txt')]);
+    expect(prov.pasteBlockReason, isNull);
+
+    // Un dossier dans lui-même ou dans un de ses sous-dossiers.
+    prov.copyToClipboard([b]);
+    await prov.navigateTo(b);
+    expect(prov.pasteBlockReason, contains('lui-même'));
+    await prov.navigateTo(p.join(b, 'sous'));
+    expect(prov.pasteBlockReason, contains('lui-même'));
+    expect(prov.clipboard, [b]);
+  });
+
   test('renommer vers un nom existant est refusé', () async {
     File(p.join(b, 'one.txt')).writeAsStringSync('un');
     File(p.join(b, 'two.txt')).writeAsStringSync('deux');

@@ -445,6 +445,10 @@ class _CodeCursorBlinkController extends ValueNotifier<bool> {
 
   Timer? _timer;
 
+  // OmniExplorer: cancellable (was Future.delayed), otherwise it fires after
+  // dispose() when the editor is closed within 100 ms of gaining focus.
+  Timer? _showTimer;
+
   _CodeCursorBlinkController() : super(false);
 
   void startBlink() {
@@ -454,7 +458,8 @@ class _CodeCursorBlinkController extends ValueNotifier<bool> {
     _timer = Timer.periodic(_kCursorBlinkHalfPeriod, _cursorTick);
     if (kIsAndroid || kIsIOS) {
       // Wait selection position to update
-      Future.delayed(const Duration(milliseconds: 100), () {
+      _showTimer?.cancel();
+      _showTimer = Timer(const Duration(milliseconds: 100), () {
         value = true;
       });
     } else {
@@ -463,6 +468,8 @@ class _CodeCursorBlinkController extends ValueNotifier<bool> {
   }
 
   void stopBlink() {
+    _showTimer?.cancel();
+    _showTimer = null;
     if (_timer == null) {
       return;
     }

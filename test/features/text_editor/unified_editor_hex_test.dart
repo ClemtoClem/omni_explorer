@@ -47,12 +47,14 @@ void main() {
 
   testWidgets('hex → texte est refusé pour un fichier binaire', (tester) async {
     final file = File(p.join(sandbox.path, 'data.bin'))
-      ..writeAsBytesSync(Uint8List.fromList([0xFF, 0xFE, 0x00, 0xC3, 0x28]));
+      // En-tête ELF : octet nul. (Un début FF FE serait un BOM UTF-16.)
+      ..writeAsBytesSync(
+          Uint8List.fromList([0x7F, 0x45, 0x4C, 0x46, 0x02, 0x00, 0xC3, 0x28]));
     await openEditor(tester, file.path, forceHex: true);
 
     await switchMode(tester, 'Texte');
 
-    expect(find.textContaining('pas du texte UTF-8'), findsOneWidget);
+    expect(find.textContaining('pas du texte'), findsOneWidget);
     expect(find.text('OFFSET'), findsOneWidget); // toujours en hexadécimal
   });
 

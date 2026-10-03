@@ -3,7 +3,9 @@
 /// l'éditeur, selon sa taille et son contenu, pour ne jamais charger en
 /// mémoire un fichier que l'éditeur ne peut pas gérer.
 ///
-/// - Contenu binaire (octet nul, UTF-8 invalide au début) → hexadécimal.
+/// - Contenu binaire → hexadécimal. Un texte non UTF-8 (Windows-1252,
+///   UTF-16) n'est pas binaire : son encodage est détecté
+///   ([EditorEncodingDetector]) et utilisé pour le lire et l'écrire.
 /// - Au-delà de [EditorLimits.textMaxBytes], ou avec une ligne de plus de
 ///   [EditorLimits.maxLineBytes] → pas d'ouverture en texte : l'utilisateur
 ///   choisit l'aperçu hexadécimal (lecture partielle) ou annule.
@@ -20,6 +22,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/editor_view_mode.dart';
+import 'editor_encoding.dart';
 
 class EditorLimits {
   EditorLimits._();
@@ -47,17 +50,21 @@ class EditorLimits {
 class FileProbe {
   final int size;
 
-  /// Vrai si le début du fichier contient un octet nul ou de l'UTF-8
-  /// invalide (images, exécutables, archives, documents Office…).
+  /// Vrai si le début du fichier n'est pas du texte (images, exécutables,
+  /// archives, documents Office…), voir [isBinary].
   final bool looksBinary;
 
   /// Vrai si une ligne dépasse [EditorLimits.maxLineBytes].
   final bool hasLongLines;
 
+  /// Encodage détecté sur le début du fichier.
+  final EditorEncoding encoding;
+
   const FileProbe({
     required this.size,
     required this.looksBinary,
     this.hasLongLines = false,
+    this.encoding = EditorEncoding.utf8,
   });
 
   /// Lit la taille et au plus [EditorLimits.sniffBytes] octets, puis, pour
@@ -68,7 +75,10 @@ class FileProbe {
     try {
       final size = await raf.length();
       final head = await raf.read(EditorLimits.sniffBytes);
-      final binary = looksBinaryBytes(head, truncated: size > head.length);
+      final truncated = size > head.length;
+      final encoding =
+          EditorEncodingDetector.detect(head, truncated: truncated);
+      final binary = isBinary(head, encoding, truncated: truncated);
       var longLines = false;
       if (!binary && size <= EditorLimits.textMaxBytes) {
         await raf.setPosition(0);
@@ -81,7 +91,10 @@ class FileProbe {
         longLines = current < 0;
       }
       return FileProbe(
-          size: size, looksBinary: binary, hasLongLines: longLines);
+          size: size,
+          looksBinary: binary,
+          hasLongLines: longLines,
+          encoding: encoding);
     } finally {
       await raf.close();
     }
@@ -116,6 +129,21 @@ class FileProbe {
         size: text.length,
         looksBinary: false,
         hasLongLines: longest > EditorLimits.maxLineBytes);
+  }
+
+  /// Vrai si [head], d'encodage détecté [encoding], n'est pas du texte.
+  /// - BOM ou UTF-16 : texte (les octets nuls font partie de l'encodage) ;
+  /// - UTF-8 : binaire s'il contient un octet nul ;
+  /// - Windows-1252 (UTF-8 invalide) : binaire si octet nul ou caractères
+  ///   de contrôle en nombre ([EditorEncodingDetector.looksBinary8Bit]).
+  ///   Un « é » isolé (0xE9) est du Latin-1 légitime.
+  static bool isBinary(List<int> head, EditorEncoding encoding,
+      {bool truncated = false}) {
+    if (encoding.isUnicodeMarked) return false;
+    if (encoding == EditorEncoding.windows1252) {
+      return EditorEncodingDetector.looksBinary8Bit(head);
+    }
+    return looksBinaryBytes(head, truncated: truncated);
   }
 
   /// Vrai si [head] n'est pas du texte UTF-8. Avec [truncated], jusqu'à

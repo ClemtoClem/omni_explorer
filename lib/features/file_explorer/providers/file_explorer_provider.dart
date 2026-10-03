@@ -103,6 +103,27 @@ class FileExplorerProvider extends ChangeNotifier {
   int get clipboardCount => _clipboard.length;
   bool get clipboardIsCut => _clipboardCut;
 
+  /// Chemins en attente de copie ou de déplacement.
+  List<String> get clipboard => List.unmodifiable(_clipboard);
+
+  /// Pourquoi le presse-papiers ne peut pas être collé dans le dossier
+  /// courant, ou `null` si c'est possible.
+  String? get pasteBlockReason {
+    if (_clipboard.isEmpty) return null;
+    if (_currentPath.isEmpty || _error != null) return 'Dossier inaccessible';
+    for (final src in _clipboard) {
+      if (FileSystemEntity.isDirectorySync(src) &&
+          (p.equals(src, _currentPath) || p.isWithin(src, _currentPath))) {
+        return 'Un dossier ne peut pas aller dans lui-même';
+      }
+    }
+    if (_clipboardCut &&
+        _clipboard.every((src) => p.equals(p.dirname(src), _currentPath))) {
+      return 'Déjà dans ce dossier';
+    }
+    return null;
+  }
+
   /// Vrai si on est déjà à la racine et qu'on ne peut plus remonter.
   bool get isAtRoot => _currentPath == _rootPath;
 

@@ -14,12 +14,18 @@
 ///   - Mode Workspace : arborescence latérale + .workspace.json à la racine
 ///   - Barre d'autocomplétion : mots-clés du langage + symboles du fichier courant
 ///     + symboles du workspace
+///   - Barre d'état, recherche / remplacement (casse, mot entier, expression),
+///     palette de commandes (Ctrl+Maj+P), opérations sur les lignes,
+///     recherche dans le projet, nouveau fichier / enregistrer sous
+///
+/// Modèle et état : `models/editor_tab.dart`,
+/// `providers/unified_editor_provider.dart`.
 
-import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -37,364 +43,40 @@ import '../../../core/utils/atomic_write.dart';
 import '../../../core/utils/file_utils.dart';
 import '../../../core/utils/system_ui.dart';
 import '../../../core/widgets/custom_keyboard.dart';
+import '../../file_explorer/explorer_picker.dart';
+import '../../file_explorer/screens/file_explorer_screen.dart';
 import '../languages/language_registry.dart';
 import '../widgets/terminal_panel.dart';
 import '../completions/language_completions.dart';
+import '../models/editor_cursor.dart';
+import '../models/editor_tab.dart';
+import '../models/project_node.dart';
+import '../models/rich_text_controller.dart';
 import '../models/editor_view_mode.dart';
-import '../models/workspace_settings.dart';
-import '../services/editor_intelligence.dart';
+import '../services/editor_drafts.dart';
+import '../services/editor_encoding.dart';
+import '../services/code_ctrl_adapter.dart';
 import '../services/editor_open_policy.dart';
 import '../services/hex_file_io.dart';
+import '../services/line_operations.dart';
+import '../services/project_search.dart';
+import '../services/text_search.dart';
+import '../providers/unified_editor_provider.dart';
 import '../services/workspace_service.dart';
+import '../widgets/command_palette.dart';
+import '../widgets/editor_search_bar.dart';
+import '../widgets/editor_status_bar.dart';
+import '../widgets/editor_tab_bar.dart';
+import '../widgets/go_to_line_dialog.dart';
+import 'project_search_screen.dart';
 import 'workspace_settings_screen.dart';
 
 export '../models/editor_view_mode.dart';
+export '../providers/unified_editor_provider.dart';
 
 // ─── Constantes ───────────────────────────────────────────────────────────────
 
-
 const int _hexBytesPerRow = 8;
-
-// ─── Formatage texte enrichi ──────────────────────────────────────────────────
-
-enum _RichFmt { bold, italic, underline, strikethrough }
-
-class _FmtSpan {
-  int start;
-  int end;
-  final Set<_RichFmt> formats;
-  final Color? textColor;
-
-  _FmtSpan(this.start, this.end, this.formats, [this.textColor]);
-
-  Map<String, dynamic> toJson() => {
-        'start': start,
-        'end': end,
-        'formats': formats.map((f) => f.index).toList(),
-        if (textColor != null) 'color': textColor!.toARGB32(),
-      };
-
-  factory _FmtSpan.fromJson(Map<String, dynamic> j) => _FmtSpan(
-        j['start'] as int,
-        j['end'] as int,
-        (j['formats'] as List?)
-                ?.map((i) => _RichFmt.values[i as int])
-                .toSet() ??
-            {},
-        j['color'] != null ? Color(j['color'] as int) : null,
-      );
-}
-
-class _RichTextController extends TextEditingController {
-  final List<_FmtSpan> spans = [];
-
-  _RichTextController({super.text});
-
-  void toggleFormat(_RichFmt fmt, int start, int end) {
-    if (start >= end) return;
-    final hasAll = spans.any(
-        (s) => s.start <= start && s.end >= end && s.formats.contains(fmt));
-    if (hasAll) {
-      spans.removeWhere((s) => s.start >= start && s.end <= end);
-    } else {
-      _merge(_FmtSpan(start, end, {fmt}));
-    }
-    notifyListeners();
-  }
-
-  void setTextColor(Color? color, int start, int end) {
-    if (start >= end) return;
-    _merge(_FmtSpan(start, end, {}, color));
-    notifyListeners();
-  }
-
-  void clearRange(int start, int end) {
-    spans.removeWhere((s) => s.start >= start && s.end <= end);
-    notifyListeners();
-  }
-
-  void _merge(_FmtSpan s) {
-    spans.removeWhere((e) => e.start >= s.start && e.end <= s.end);
-    spans.add(s);
-  }
-
-  String get formattingJson =>
-      jsonEncode(spans.map((s) => s.toJson()).toList());
-
-  void loadFromJson(String json) {
-    spans.clear();
-    try {
-      final list = jsonDecode(json) as List;
-      spans.addAll(list.map((e) => _FmtSpan.fromJson(e as Map<String, dynamic>)));
-    } catch (_) {}
-    notifyListeners();
-  }
-
-  @override
-  TextSpan buildTextSpan({
-    required BuildContext context,
-    TextStyle? style,
-    required bool withComposing,
-  }) {
-    final src = text;
-    if (src.isEmpty || spans.isEmpty) return TextSpan(text: src, style: style);
-    final base = style ?? const TextStyle();
-    final cs = List<TextStyle>.filled(src.length, base);
-    for (final sp in spans) {
-      final s = sp.start.clamp(0, src.length);
-      final e = sp.end.clamp(0, src.length);
-      for (int i = s; i < e; i++) {
-        cs[i] = cs[i].copyWith(
-          fontWeight:
-              sp.formats.contains(_RichFmt.bold) ? FontWeight.bold : null,
-          fontStyle:
-              sp.formats.contains(_RichFmt.italic) ? FontStyle.italic : null,
-          decoration: _deco(sp.formats),
-          color: sp.textColor,
-        );
-      }
-    }
-    final result = <InlineSpan>[];
-    int i = 0;
-    while (i < src.length) {
-      int j = i + 1;
-      while (j < src.length && cs[j] == cs[i]) { j++; }
-      result.add(TextSpan(text: src.substring(i, j), style: cs[i]));
-      i = j;
-    }
-    return TextSpan(children: result, style: base);
-  }
-
-  TextDecoration? _deco(Set<_RichFmt> f) {
-    final parts = <TextDecoration>[];
-    if (f.contains(_RichFmt.underline)) parts.add(TextDecoration.underline);
-    if (f.contains(_RichFmt.strikethrough)) parts.add(TextDecoration.lineThrough);
-    return parts.isEmpty ? null : TextDecoration.combine(parts);
-  }
-}
-
-// ─── Adaptateur CodeEditor ↔ CustomKeyboard ───────────────────────────────────
-
-class _CodeCtrlAdapter {
-  CodeLineEditingController codeCtrl;
-  _CodeCtrlAdapter(this.codeCtrl);
-
-  TextEditingValue get value {
-    final text = codeCtrl.text;
-    final sel = codeCtrl.selection;
-    return TextEditingValue(
-      text: text,
-      selection: TextSelection(
-        baseOffset: _toFlat(text, sel.baseIndex, sel.baseOffset),
-        extentOffset: _toFlat(text, sel.extentIndex, sel.extentOffset),
-      ),
-    );
-  }
-
-  set value(TextEditingValue val) {
-    codeCtrl.text = val.text;
-    final base = _toLC(val.text, val.selection.baseOffset);
-    final ext = _toLC(val.text, val.selection.extentOffset);
-    codeCtrl.selection = CodeLineSelection(
-      baseIndex: base.$1,
-      baseOffset: base.$2,
-      extentIndex: ext.$1,
-      extentOffset: ext.$2,
-    );
-  }
-
-  int _toFlat(String t, int line, int col) {
-    final lines = t.split('\n');
-    int off = 0;
-    for (int i = 0; i < line && i < lines.length; i++) {
-      off += lines[i].length + 1;
-    }
-    return off + col;
-  }
-
-  (int, int) _toLC(String t, int flat) {
-    if (flat <= 0) return (0, 0);
-    final lines = t.split('\n');
-    int cur = 0;
-    for (int i = 0; i < lines.length; i++) {
-      if (cur + lines[i].length >= flat) return (i, flat - cur);
-      cur += lines[i].length + 1;
-    }
-    return (lines.length - 1, lines.last.length);
-  }
-}
-
-// ─── Modèle d'onglet ──────────────────────────────────────────────────────────
-
-class _UTab {
-  final String path;
-  String content;
-  bool isDirty = false;
-  bool isReadOnly;
-  EditorViewMode viewMode;
-  LanguageDefinition? lang;
-
-  CodeLineEditingController? codeCtrl;
-  TextEditingController? textCtrl;
-  _RichTextController? richCtrl;
-  EditorIntelligence? intel;
-
-  bool showMdPreview;
-
-  // État hexadécimal
-  Uint8List? bytes;
-  int hexSelectedOffset;
-  bool hexModified;
-  /// Taille du fichier sur le disque au chargement des octets.
-  int hexFileLength;
-  TextEditingController? hexInputCtrl;
-  FocusNode? hexInputFocus;
-  ScrollController? hexScrollCtrl;
-
-  _UTab({
-    required this.path,
-    required this.content,
-    this.isReadOnly = true,
-    required this.viewMode,
-    this.lang,
-  })  : showMdPreview = viewMode == EditorViewMode.markdown,
-        hexSelectedOffset = -1,
-        hexModified = false,
-        hexFileLength = 0 {
-    _init();
-  }
-
-  String get name => p.basename(path);
-
-  /// Vrai si seul le début du fichier est chargé en hexadécimal : l'onglet
-  /// doit alors rester en lecture seule.
-  bool get hexTruncated => bytes != null && bytes!.length < hexFileLength;
-
-  void _init() {
-    switch (viewMode) {
-      case EditorViewMode.code:
-      case EditorViewMode.markdown:
-        codeCtrl = CodeLineEditingController.fromText(content);
-        final ext = p.extension(path).replaceFirst('.', '').toLowerCase();
-        final isMarkdown = viewMode == EditorViewMode.markdown;
-        intel = EditorIntelligence(
-          codeCtrl!,
-          bulletContinuation: isMarkdown,
-          autoCloseBracket: true,
-          autoCloseTag: isMarkdown ||
-              const {'html', 'htm', 'xml', 'svg', 'vue', 'xhtml', 'jsx', 'tsx'}
-                  .contains(ext),
-        );
-        break;
-      case EditorViewMode.text:
-        textCtrl = TextEditingController(text: content);
-        break;
-      case EditorViewMode.richText:
-        richCtrl = _RichTextController(text: content);
-        break;
-      case EditorViewMode.hex:
-        hexInputCtrl = TextEditingController();
-        hexInputFocus = FocusNode();
-        hexScrollCtrl = ScrollController();
-        break;
-    }
-  }
-
-  void switchMode(EditorViewMode newMode) {
-    if (newMode == viewMode) return;
-    _dispose();
-    viewMode = newMode;
-    _init();
-  }
-
-  void _dispose() {
-    intel?.dispose();
-    intel = null;
-    codeCtrl?.dispose();
-    codeCtrl = null;
-    textCtrl?.dispose();
-    textCtrl = null;
-    richCtrl?.dispose();
-    richCtrl = null;
-    hexInputCtrl?.dispose();
-    hexInputCtrl = null;
-    hexInputFocus?.dispose();
-    hexInputFocus = null;
-    hexScrollCtrl?.dispose();
-    hexScrollCtrl = null;
-  }
-
-  void dispose() => _dispose();
-}
-
-// ─── Nœud arborescence projet ─────────────────────────────────────────────────
-
-class _ProjNode {
-  final String path;
-  final String name;
-  final bool isDir;
-  final int depth;
-  bool expanded = false;
-  List<_ProjNode> children = const [];
-
-  _ProjNode({
-    required this.path,
-    required this.name,
-    required this.isDir,
-    required this.depth,
-  });
-}
-
-// ─── Provider état persistant ─────────────────────────────────────────────────
-
-/// Conserve les onglets ouverts entre les navigations vers l'explorateur.
-// ignore: library_private_types_in_public_api
-class UnifiedEditorProvider extends ChangeNotifier {
-  // ignore: library_private_types_in_public_api
-  final List<_UTab> tabs = [];
-  int activeTabIndex = 0;
-  bool isWorkspace = false;
-  String workspacePath = '';
-  WorkspaceSettings ws = const WorkspaceSettings();
-  // ignore: library_private_types_in_public_api
-  List<_ProjNode> tree = [];
-  bool showTree = true;
-
-  // ignore: library_private_types_in_public_api
-  _UTab? get activeTab =>
-      tabs.isEmpty || activeTabIndex >= tabs.length ? null : tabs[activeTabIndex];
-
-  int indexOfPath(String path) => tabs.indexWhere((t) => t.path == path);
-
-  // ignore: library_private_types_in_public_api
-  void addTab(_UTab tab) {
-    tabs.add(tab);
-    activeTabIndex = tabs.length - 1;
-    notifyListeners();
-  }
-
-  void removeTab(int index) {
-    tabs[index].dispose();
-    tabs.removeAt(index);
-    if (activeTabIndex >= tabs.length && activeTabIndex > 0) {
-      activeTabIndex = tabs.length - 1;
-    }
-    notifyListeners();
-  }
-
-  void setActiveTabIndex(int index) {
-    if (index >= 0 && index < tabs.length) {
-      activeTabIndex = index;
-      notifyListeners();
-    }
-  }
-
-  @override
-  void dispose() {
-    for (final t in tabs) { t.dispose(); }
-    super.dispose();
-  }
-}
 
 // ─── Écran principal ──────────────────────────────────────────────────────────
 
@@ -415,8 +97,7 @@ class UnifiedEditorScreen extends StatefulWidget {
 }
 
 class _UnifiedEditorState extends State<UnifiedEditorScreen>
-    with TickerProviderStateMixin {
-
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   // ── État persistant (survit aux navigations) ──────────────────────────────
 
   late UnifiedEditorProvider _p;
@@ -430,18 +111,36 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   // ── Recherche ─────────────────────────────────────────────────────────────
 
   bool _showSearch = false;
-  final _searchCtrl = TextEditingController();
-  final _replaceCtrl = TextEditingController();
+  final _searchBarKey = GlobalKey<EditorSearchBarState>();
+  TextSearchQuery _searchQuery = const TextSearchQuery('');
+  bool _searchReplace = false;
+
+  /// Occurrences dans l'onglet actif, recalculées quand la requête ou le
+  /// texte change (même minuterie que la barre d'état).
+  List<TextMatch> _matches = const [];
+  int _matchIndex = -1;
 
   // ── Autocomplétion ────────────────────────────────────────────────────────
 
   List<String> _completions = [];
   List<String> _wsSymbols = [];
+  Timer? _completionDebounce;
+
+  // ── Barre d'état ──────────────────────────────────────────────────────────
+
+  /// Position et taille du document actif. Notifier dédié : déplacer le
+  /// curseur ne reconstruit que la barre d'état, pas tout l'écran.
+  final _stats = ValueNotifier<_DocStats>(_DocStats.empty);
+  Timer? _statsTimer;
+
+  /// Contrôleur pour lequel [_stats] a été calculé : un changement d'onglet
+  /// ou de mode impose un recalcul.
+  Object? _statsSource;
 
   // ── Clavier custom ────────────────────────────────────────────────────────
 
   final FocusNode _editorFocus = FocusNode();
-  _CodeCtrlAdapter? _kbAdapter;
+  CodeCtrlAdapter? _kbAdapter;
 
   // ── Couleur texte enrichi (dernière sélection) ────────────────────────────
 
@@ -477,16 +176,31 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
         }
       }
     });
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
     // Les onglets sont conservés dans UnifiedEditorProvider — pas de dispose ici.
-    _searchCtrl.dispose();
-    _replaceCtrl.dispose();
     _editorFocus.dispose();
     _runProcess?.kill();
+    _completionDebounce?.cancel();
+    _statsTimer?.cancel();
+    _stats.dispose();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // `hidden` précède `paused` sur toutes les plateformes ; `inactive` est
+    // ignoré (volet de notifications, dialogue système : l'application
+    // reste visible).
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _persistDrafts();
+    }
   }
 
   // ── Workspace ─────────────────────────────────────────────────────────────
@@ -529,6 +243,26 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     if (mounted) setState(() => _wsSymbols = symbols.toList());
   }
 
+  /// Écrit un brouillon de chaque onglet texte modifié. Le fichier lui-même
+  /// n'est pas touché : sauvegarder reste une décision de l'utilisateur.
+  Future<void> _persistDrafts() async {
+    for (final tab in List.of(_p.tabs)) {
+      if (!tab.isDirty || tab.viewMode == EditorViewMode.hex) continue;
+      try {
+        await EditorDrafts.save(EditorDraft(
+          path: tab.path,
+          content: tab.currentText,
+          encoding: tab.encoding,
+          savedAt: DateTime.now(),
+          baseModified: tab.diskModified,
+          baseSize: tab.diskSize,
+        ));
+      } catch (_) {
+        // Au mieux : l'application part en arrière-plan, pas de message.
+      }
+    }
+  }
+
   // ── Gestion des fichiers ──────────────────────────────────────────────────
 
   Future<void> _openFile(String path) async {
@@ -562,28 +296,57 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     final mode = decision.mode;
     if (decision.notice != null) _snack(decision.notice!);
 
-    _UTab tab;
+    EditorTab tab;
     if (mode == EditorViewMode.hex) {
-      tab = _UTab(
-          path: path, content: '', isReadOnly: true, viewMode: mode, lang: lang);
+      tab = EditorTab(
+          path: path,
+          content: '',
+          isReadOnly: true,
+          viewMode: mode,
+          lang: lang);
       if (!await _loadHexBytes(tab, path)) {
         tab.dispose();
         return;
       }
     } else {
-      String content = '';
+      final List<int> raw;
+      final FileStat stat;
       try {
-        content = await File(path).readAsString();
-      } catch (e) {
-        _showErr('Lecture impossible : $e');
+        raw = await File(path).readAsBytes();
+        stat = await File(path).stat();
+      } on FileSystemException catch (e) {
+        _showErr('Lecture impossible : ${e.message}');
         return;
       }
-      tab = _UTab(
+      final decoded = _decodeText(raw, probe.encoding);
+      if (decoded == null) return;
+      var (content, encoding) = decoded;
+
+      // Brouillon laissé par une session interrompue (application tuée en
+      // arrière-plan) : proposer de le reprendre.
+      var restored = false;
+      final draft = await EditorDrafts.load(path);
+      if (draft != null && draft.content != content) {
+        final changedOnDisk =
+            draft.baseModified != stat.modified || draft.baseSize != stat.size;
+        restored = await _confirmRestoreDraft(path, changedOnDisk);
+        if (restored) {
+          content = draft.content;
+          encoding = draft.encoding;
+        }
+      }
+      if (draft != null && !restored) await EditorDrafts.delete(path);
+
+      tab = EditorTab(
           path: path,
           content: content,
-          isReadOnly: true,
+          isReadOnly: !restored,
           viewMode: mode,
-          lang: lang);
+          lang: lang)
+        ..encoding = encoding
+        ..diskModified = stat.modified
+        ..diskSize = stat.size
+        ..isDirty = restored;
       if (mode == EditorViewMode.richText) await _loadRichFmt(tab);
       _attachListeners(tab);
     }
@@ -594,9 +357,107 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       _p.activeTabIndex = _p.tabs.length - 1;
       _syncKb();
     });
+    _p.tabsChanged();
+    _restoreCursor(tab);
     if (mounted) {
       context.read<SettingsService>().addRecentFile(path);
     }
+  }
+
+  /// Replace le curseur où il était quand le fichier a été fermé (pendant
+  /// la session).
+  void _restoreCursor(EditorTab tab) {
+    final cursor = _p.cursors[tab.path];
+    if (cursor == null || cursor == EditorCursor.start) return;
+    _moveCursorTo(tab, cursor.line, cursor.column);
+  }
+
+  /// Place le curseur de [tab] en [line]:[column] (1-indexées, bornées au
+  /// document) et fait défiler jusqu'à lui.
+  void _moveCursorTo(EditorTab tab, int line, int column, {int length = 0}) {
+    final code = tab.codeCtrl;
+    final ctrl = tab.textCtrl ?? tab.richCtrl;
+    final text = code?.text ?? ctrl?.text;
+    if (text == null) return;
+    var start = EditorCursor.offsetOfLine(text, line);
+    if (start < 0) start = text.length;
+    var lineEnd = text.indexOf('\n', start);
+    if (lineEnd < 0) lineEnd = text.length;
+    final offset = (start + column - 1).clamp(start, lineEnd);
+    _selectRange(tab, offset, (offset + length).clamp(offset, text.length));
+  }
+
+  /// Sélectionne [start, end[ dans l'onglet [tab] et fait défiler jusqu'à
+  /// la sélection.
+  void _selectRange(EditorTab tab, int start, int end, {bool focus = false}) {
+    final code = tab.codeCtrl;
+    if (code != null) {
+      final text = code.text;
+      final a = _toLC(text, start), b = _toLC(text, end);
+      code.selection = CodeLineSelection(
+        baseIndex: a.$1,
+        baseOffset: a.$2,
+        extentIndex: b.$1,
+        extentOffset: b.$2,
+      );
+      // Éditeur pas encore construit (onglet qui vient de s'ouvrir) : le
+      // défilement attend la prochaine frame.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (tab.codeCtrl == code) code.makeCursorVisible();
+      });
+    } else {
+      final ctrl = tab.textCtrl ?? tab.richCtrl;
+      if (ctrl == null) return;
+      ctrl.selection = TextSelection(baseOffset: start, extentOffset: end);
+    }
+    // Un champ texte ne fait défiler jusqu'à la sélection qu'avec le focus.
+    if (focus) _editorFocus.requestFocus();
+  }
+
+  /// Décode [raw] avec l'encodage détecté sur le début du fichier. Si de
+  /// l'UTF-8 invalide apparaît plus loin que la partie analysée, le fichier
+  /// est relu en Windows-1252, qui accepte tous les octets. Retourne `null`
+  /// si le décodage est impossible (message déjà affiché).
+  (String, EditorEncoding)? _decodeText(List<int> raw, EditorEncoding enc) {
+    try {
+      return (EditorEncodingCodec.decode(raw, enc), enc);
+    } on EditorEncodingException catch (e) {
+      if (enc != EditorEncoding.utf8) {
+        _showErr('Lecture impossible : $e');
+        return null;
+      }
+      _snack('UTF-8 invalide plus loin dans le fichier : ouvert en '
+          '${EditorEncoding.windows1252.label}.');
+      return (
+        EditorEncodingCodec.decode(raw, EditorEncoding.windows1252),
+        EditorEncoding.windows1252,
+      );
+    }
+  }
+
+  Future<bool> _confirmRestoreDraft(String path, bool changedOnDisk) async {
+    if (!mounted) return false;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dCtx) => AlertDialog(
+        title: const Text('Modifications non sauvegardées'),
+        content: Text(
+            '« ${p.basename(path)} » a été modifié lors d\'une session '
+            'précédente, sans être sauvegardé. Reprendre ces modifications ?'
+            '${changedOnDisk ? '\n\nAttention : le fichier a changé sur le '
+                'disque depuis.' : ''}'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dCtx, false),
+              child: const Text('Abandonner')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dCtx, true),
+              child: const Text('Reprendre')),
+        ],
+      ),
+    );
+    return ok == true;
   }
 
   /// Fichier non affichable en texte : propose l'aperçu hexadécimal.
@@ -617,8 +478,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       context: context,
       builder: (dCtx) => AlertDialog(
         title: const Text('Fichier volumineux'),
-        content: Text(
-            '$why\n\n'
+        content: Text('$why\n\n'
             'L\'ouvrir en hexadécimal ? Au-delà de '
             '${FileUtils.formatSize(HexFileIO.maxLoadedBytes)}, seul le début '
             'est affiché, en lecture seule.'),
@@ -663,7 +523,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   /// Charge (ou recharge depuis le disque) les octets de [tab].
   /// Retourne `false` si la lecture a échoué (erreur déjà affichée).
-  Future<bool> _loadHexBytes(_UTab tab, String path) async {
+  Future<bool> _loadHexBytes(EditorTab tab, String path) async {
     try {
       final loaded = await HexFileIO.load(path);
       tab.bytes = loaded.bytes;
@@ -678,7 +538,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     }
   }
 
-  Future<void> _loadRichFmt(_UTab tab) async {
+  Future<void> _loadRichFmt(EditorTab tab) async {
     final fmtFile = File('${tab.path}.fmt');
     if (fmtFile.existsSync()) {
       try {
@@ -687,10 +547,213 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     }
   }
 
-  void _attachListeners(_UTab tab) {
-    tab.codeCtrl?.addListener(() => _updateCompletions(tab));
-    tab.textCtrl?.addListener(() => _updateCompletionsTxt(tab));
-    tab.richCtrl?.addListener(() => _updateCompletionsTxt(tab));
+  void _attachListeners(EditorTab tab) {
+    tab.codeCtrl?.addListener(() {
+      _updateCompletions(tab);
+      _scheduleStats(tab);
+    });
+    tab.textCtrl?.addListener(() {
+      _updateCompletionsTxt(tab);
+      _scheduleStats(tab);
+    });
+    tab.richCtrl?.addListener(() {
+      _updateCompletionsTxt(tab);
+      _scheduleStats(tab);
+    });
+  }
+
+  // ── Barre d'état ──────────────────────────────────────────────────────────
+
+  /// Recalcule la position et la taille du document actif au prochain tour
+  /// de boucle : les contrôleurs notifient aussi pendant la construction des
+  /// widgets (même raison que pour l'autocomplétion), et plusieurs
+  /// notifications d'une même frappe n'entraînent qu'un calcul.
+  void _scheduleStats([EditorTab? from]) {
+    if (from != null && from != _p.activeTab) return;
+    _statsTimer?.cancel();
+    _statsTimer = Timer(Duration.zero, () {
+      if (!mounted) return;
+      _stats.value = _computeStats(_p.activeTab);
+      if (_showSearch) _refreshMatches();
+    });
+  }
+
+  _DocStats _computeStats(EditorTab? tab) {
+    if (tab == null) return _DocStats.empty;
+    final code = tab.codeCtrl;
+    if (code != null) {
+      final sel = code.selection;
+      // Longueur sans construire le texte complet : caractères des lignes
+      // (repliées comprises) et fins de ligne.
+      var chars = 0;
+      for (final segment in code.codeLines.segments) {
+        for (final line in segment) {
+          chars += line.charCount;
+        }
+      }
+      return _DocStats(
+        EditorCursor(line: sel.extentIndex + 1, column: sel.extentOffset + 1),
+        code.lineCount,
+        chars + code.lineCount - 1,
+      );
+    }
+    final ctrl = tab.textCtrl ?? tab.richCtrl;
+    final text = ctrl?.text ?? tab.content;
+    return _DocStats(
+      EditorCursor.fromOffset(text, ctrl?.selection.extentOffset ?? 0),
+      EditorCursor.lineCountOf(text),
+      text.length,
+    );
+  }
+
+  Future<void> _showGoToLine() async {
+    final tab = _p.activeTab;
+    if (tab == null || tab.viewMode == EditorViewMode.hex) return;
+    final stats = _computeStats(tab);
+    final line = await showGoToLineDialog(
+      context,
+      lineCount: stats.lineCount,
+      currentLine: stats.cursor.line,
+    );
+    if (line == null || !mounted || !_p.tabs.contains(tab)) return;
+    _moveCursorTo(tab, line, 1);
+    _editorFocus.requestFocus();
+  }
+
+  /// Change l'encodage de l'onglet actif : relire le fichier avec un autre
+  /// encodage (onglet sans modification), ou enregistrer le texte avec un
+  /// autre encodage à la prochaine sauvegarde.
+  Future<void> _showEncodingPicker() async {
+    final tab = _p.activeTab;
+    if (tab == null || tab.viewMode == EditorViewMode.hex) return;
+    final canReopen = !tab.isDirty;
+    final choice = await showModalBottomSheet<(bool, EditorEncoding)>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sCtx) {
+        Widget section(String title, bool reopen) => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+                  child:
+                      Text(title, style: Theme.of(sCtx).textTheme.titleSmall),
+                ),
+                for (final e in EditorEncoding.values)
+                  ListTile(
+                    dense: true,
+                    title: Text(e.label),
+                    trailing: e == tab.encoding
+                        ? Icon(Icons.check_rounded, color: AppColors.accent)
+                        : null,
+                    onTap: () => Navigator.pop(sCtx, (reopen, e)),
+                  ),
+              ],
+            );
+        return SafeArea(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (canReopen) section('Rouvrir avec l\'encodage', true),
+                section('Enregistrer avec l\'encodage', false),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (choice == null || !mounted || !_p.tabs.contains(tab)) return;
+    final (reopen, encoding) = choice;
+    if (!reopen) {
+      if (encoding == tab.encoding) return;
+      setState(() {
+        tab.encoding = encoding;
+        tab.isDirty = true; // les octets du fichier vont changer
+      });
+      _snack('Sera enregistré en ${encoding.label}');
+      return;
+    }
+    final List<int> raw;
+    try {
+      raw = await File(tab.path).readAsBytes();
+    } on FileSystemException catch (e) {
+      _showErr('Lecture impossible : ${e.message}');
+      return;
+    }
+    final String text;
+    try {
+      text = EditorEncodingCodec.decode(raw, encoding);
+    } on EditorEncodingException catch (e) {
+      _showErr('Ce fichier n\'est pas en ${encoding.label} : $e');
+      return;
+    }
+    if (!mounted || !_p.tabs.contains(tab)) return;
+    setState(() {
+      tab.encoding = encoding;
+      tab.reload(text);
+      _attachListeners(tab);
+      _syncKb();
+    });
+    if (tab.viewMode == EditorViewMode.richText) await _loadRichFmt(tab);
+  }
+
+  /// Choisit le langage de l'onglet actif (coloration, autocomplétion,
+  /// exécution), indépendamment de l'extension.
+  Future<void> _showLanguagePicker() async {
+    final tab = _p.activeTab;
+    if (tab == null || tab.viewMode == EditorViewMode.hex) return;
+    final langs = LanguageRegistry.instance.all
+      ..sort((a, b) => a.label.toLowerCase().compareTo(b.label.toLowerCase()));
+    // Sentinelle « texte brut » : null signifie « fermé sans choisir ».
+    const plain = '';
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (sCtx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        builder: (_, scroll) => ListView(
+          controller: scroll,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.text_snippet_outlined),
+              title: const Text('Texte brut'),
+              trailing: tab.lang == null
+                  ? Icon(Icons.check_rounded, color: AppColors.accent)
+                  : null,
+              onTap: () => Navigator.pop(sCtx, plain),
+            ),
+            for (final l in langs)
+              ListTile(
+                leading: Icon(l.icon, color: l.color),
+                title: Text(l.label),
+                trailing: tab.lang?.id == l.id
+                    ? Icon(Icons.check_rounded, color: AppColors.accent)
+                    : null,
+                onTap: () => Navigator.pop(sCtx, l.id),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || !mounted || !_p.tabs.contains(tab)) return;
+    final lang =
+        picked == plain ? null : langs.firstWhere((l) => l.id == picked);
+    setState(() => tab.lang = lang);
+    _scheduleStats();
+    // Un langage choisi en texte brut : passer en code pour la coloration
+    // (les limites de taille d'EditorOpenPolicy s'appliquent).
+    if (lang != null &&
+        lang.id != 'plaintext' &&
+        tab.viewMode == EditorViewMode.text) {
+      await _switchViewMode(lang.id == 'markdown'
+          ? EditorViewMode.markdown
+          : EditorViewMode.code);
+    }
   }
 
   // ── Sauvegarde ────────────────────────────────────────────────────────────
@@ -721,19 +784,29 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       return;
     }
 
-    final newContent = switch (tab.viewMode) {
-      EditorViewMode.code || EditorViewMode.markdown =>
-        tab.codeCtrl?.text ?? tab.content,
-      EditorViewMode.text => tab.textCtrl?.text ?? tab.content,
-      EditorViewMode.richText => tab.richCtrl?.text ?? tab.content,
-      _ => tab.content,
-    };
+    final newContent = tab.currentText;
+    final Uint8List encoded;
+    try {
+      encoded = EditorEncodingCodec.encode(newContent, tab.encoding);
+    } on EditorEncodingException catch (e) {
+      _showErr('$e Choisissez un autre encodage (barre d\'état) pour '
+          'sauvegarder.');
+      return;
+    }
 
     try {
       // Écriture atomique : une interruption (application tuée, stockage
       // plein) laisse l'ancien contenu intact au lieu d'un fichier tronqué.
-      await AtomicWrite.string(tab.path, newContent);
+      await AtomicWrite.bytes(tab.path, encoded);
       tab.content = newContent;
+      try {
+        final stat = await File(tab.path).stat();
+        tab.diskModified = stat.modified;
+        tab.diskSize = stat.size;
+      } on FileSystemException {
+        // Sans effet sur la sauvegarde elle-même.
+      }
+      await EditorDrafts.delete(tab.path);
       if (tab.viewMode == EditorViewMode.richText && tab.richCtrl != null) {
         await AtomicWrite.string(
             '${tab.path}.fmt', tab.richCtrl!.formattingJson);
@@ -747,39 +820,115 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Fermeture d'onglet ────────────────────────────────────────────────────
 
-  Future<void> _closeTab(int idx) async {
-    final tab = _p.tabs[idx];
-    if (tab.isDirty || tab.hexModified) {
-      final res = await showDialog<String>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: const Text('Modifications non sauvegardées'),
-          content: Text('Sauvegarder « ${tab.name} » ?'),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(context, 'discard'),
-                child: const Text('Abandonner')),
-            TextButton(
-                onPressed: () => Navigator.pop(context, 'cancel'),
-                child: const Text('Annuler')),
-            FilledButton(
-                onPressed: () => Navigator.pop(context, 'save'),
-                child: const Text('Sauvegarder')),
-          ],
-        ),
-      );
-      if (res == 'cancel') return;
-      if (res == 'save') await _save(idx);
+  Future<void> _closeTab(int idx) => _closeTabs([_p.tabs[idx]]);
+
+  /// Ferme [toClose] dans l'ordre, en demandant pour chaque onglet modifié
+  /// s'il faut le sauvegarder. « Annuler » interrompt la série : les onglets
+  /// restants ne sont pas fermés.
+  Future<void> _closeTabs(Iterable<EditorTab> toClose) async {
+    for (final tab in List.of(toClose)) {
+      if (!mounted || !_p.tabs.contains(tab)) continue;
+      if (tab.isDirty || tab.hexModified) {
+        setState(() => _p.activeTabIndex = _p.tabs.indexOf(tab));
+        if (!await _confirmClose(tab) || !mounted) return;
+      } else {
+        await EditorDrafts.delete(tab.path);
+        if (!mounted) return;
+      }
+      _removeTab(tab);
     }
-    if (!mounted) return;
+  }
+
+  /// Demande quoi faire des modifications de [tab]. Retourne `false` si
+  /// l'utilisateur annule, ou si la sauvegarde demandée a échoué.
+  Future<bool> _confirmClose(EditorTab tab) async {
+    final res = await showDialog<String>(
+      context: context,
+      builder: (dCtx) => AlertDialog(
+        title: const Text('Modifications non sauvegardées'),
+        content: Text('Sauvegarder « ${tab.name} » ?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(dCtx, 'discard'),
+              child: const Text('Abandonner')),
+          TextButton(
+              onPressed: () => Navigator.pop(dCtx, 'cancel'),
+              child: const Text('Annuler')),
+          FilledButton(
+              onPressed: () => Navigator.pop(dCtx, 'save'),
+              child: const Text('Sauvegarder')),
+        ],
+      ),
+    );
+    switch (res) {
+      case 'save':
+        final idx = _p.tabs.indexOf(tab);
+        if (idx < 0) return false;
+        await _save(idx);
+        return !tab.isDirty && !tab.hexModified;
+      case 'discard':
+        await EditorDrafts.delete(tab.path);
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// Retire [tab] sans confirmation, en gardant si possible l'onglet actif.
+  void _removeTab(EditorTab tab) {
+    final idx = _p.tabs.indexOf(tab);
+    if (idx < 0) return;
+    final active = _p.activeTab;
     setState(() {
-      _p.tabs[idx].dispose();
+      _p.closedPaths
+        ..remove(tab.path)
+        ..add(tab.path);
+      if (_p.closedPaths.length > 20) _p.closedPaths.removeAt(0);
+      _p.cursors[tab.path] = _computeStats(tab).cursor;
+      tab.dispose();
       _p.tabs.removeAt(idx);
-      if (_p.activeTabIndex >= _p.tabs.length && _p.activeTabIndex > 0) {
-        _p.activeTabIndex = _p.tabs.length - 1;
+      final keep = active == null ? -1 : _p.tabs.indexOf(active);
+      if (keep >= 0) {
+        _p.activeTabIndex = keep;
+      } else if (_p.activeTabIndex >= _p.tabs.length) {
+        _p.activeTabIndex = math.max(0, _p.tabs.length - 1);
       }
       _syncKb();
     });
+    _p.tabsChanged();
+  }
+
+  Future<void> _handleTabAction(int index, TabAction action) async {
+    if (index >= _p.tabs.length) return;
+    final target = _p.tabs[index];
+    final tabs = List.of(_p.tabs);
+    switch (action) {
+      case TabAction.close:
+        await _closeTabs([target]);
+      case TabAction.closeOthers:
+        await _closeTabs(tabs.where((t) => t != target));
+      case TabAction.closeToRight:
+        await _closeTabs(tabs.sublist(index + 1));
+      case TabAction.closeToLeft:
+        await _closeTabs(tabs.sublist(0, index));
+      case TabAction.closeAllUnmodified:
+        await _closeTabs(tabs.where((t) => !t.isDirty && !t.hexModified));
+      case TabAction.closeAll:
+        await _closeTabs(tabs);
+      case TabAction.reopenClosed:
+        await _reopenClosed();
+    }
+  }
+
+  Future<void> _reopenClosed() async {
+    while (_p.closedPaths.isNotEmpty) {
+      final path = _p.closedPaths.removeLast();
+      if (await File(path).exists()) {
+        await _openFile(path);
+        return;
+      }
+    }
+    _snack('Aucun onglet fermé à rouvrir');
   }
 
   void _enableEdit(int idx) {
@@ -827,13 +976,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     }
 
     if (!fromHex && !toHex) {
-      final cur = switch (tab.viewMode) {
-        EditorViewMode.code || EditorViewMode.markdown =>
-          tab.codeCtrl?.text ?? tab.content,
-        EditorViewMode.text => tab.textCtrl?.text ?? tab.content,
-        EditorViewMode.richText => tab.richCtrl?.text ?? tab.content,
-        _ => tab.content,
-      };
+      final cur = tab.currentText;
       setState(() {
         tab.content = cur;
         tab.switchMode(mode);
@@ -870,17 +1013,22 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       _showErr('Lecture impossible : ${e.message}');
       return;
     }
-    final String text;
-    try {
-      text = utf8.decode(raw);
-    } on FormatException {
-      _showErr('Ce fichier n\'est pas du texte UTF-8 : il reste affiché en '
+    final head = raw.length > EditorLimits.sniffBytes
+        ? raw.sublist(0, EditorLimits.sniffBytes)
+        : raw;
+    final truncated = raw.length > head.length;
+    final detected = EditorEncodingDetector.detect(head, truncated: truncated);
+    if (FileProbe.isBinary(head, detected, truncated: truncated)) {
+      _showErr('Ce fichier n\'est pas du texte : il reste affiché en '
           'hexadécimal.');
       return;
     }
-    if (!mounted) return;
+    final decoded = _decodeText(raw, detected);
+    if (decoded == null || !mounted) return;
+    final (text, encoding) = decoded;
     setState(() {
       tab.content = text;
+      tab.encoding = encoding;
       tab.bytes = null; // libère le tampon binaire
       tab.hexFileLength = 0;
       tab.switchMode(mode);
@@ -902,7 +1050,8 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   }
 
   /// Construit un [TextStyle] à partir d'un nom Google Fonts.
-  TextStyle _googleFontStyle(String family, {
+  TextStyle _googleFontStyle(
+    String family, {
     required double size,
     Color? color,
     FontWeight weight = FontWeight.w400,
@@ -912,14 +1061,15 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       return GoogleFonts.getFont(family,
           fontSize: size, color: color, fontWeight: weight, height: height);
     } catch (_) {
-      return TextStyle(fontSize: size, color: color, fontWeight: weight, height: height);
+      return TextStyle(
+          fontSize: size, color: color, fontWeight: weight, height: height);
     }
   }
 
   void _syncKb() {
     final tab = _p.activeTab;
     if (tab?.codeCtrl != null) {
-      _kbAdapter = _CodeCtrlAdapter(tab!.codeCtrl!);
+      _kbAdapter = CodeCtrlAdapter(tab!.codeCtrl!);
     } else {
       _kbAdapter = null;
     }
@@ -927,7 +1077,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Autocomplétion ────────────────────────────────────────────────────────
 
-  void _updateCompletions(_UTab tab) {
+  void _updateCompletions(EditorTab tab) {
     final ctrl = tab.codeCtrl;
     if (ctrl == null) return;
     final flat = _codeFlat(ctrl);
@@ -935,21 +1085,32 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     _refreshSuggestions(word, tab);
   }
 
-  void _updateCompletionsTxt(_UTab tab) {
+  void _updateCompletionsTxt(EditorTab tab) {
     final ctrl = tab.textCtrl ?? tab.richCtrl;
     if (ctrl == null) return;
     final word = _wordAt(ctrl.text, ctrl.selection.baseOffset);
     _refreshSuggestions(word, tab);
   }
 
-  void _refreshSuggestions(String word, _UTab tab) {
+  void _refreshSuggestions(String word, EditorTab tab) {
     final sug = LanguageCompletions.getSuggestions(
       prefix: word,
       languageId: tab.lang?.id ?? 'plaintext',
       currentFileContent: tab.content,
       workspaceSymbols: _wsSymbols,
     );
-    if (mounted && sug != _completions) setState(() => _completions = sug);
+
+    // Le listener du contrôleur peut être appelé pendant la construction du
+    // widget (CodeEditor.initState notifie le contrôleur). setState pendant
+    // build lève une exception ; on repousse l'application de l'état au
+    // prochain tour de la boucle d'événements.
+    _completionDebounce?.cancel();
+    if (!mounted) return;
+    if (listEquals(sug, _completions)) return;
+    _completionDebounce = Timer(Duration.zero, () {
+      if (!mounted) return;
+      setState(() => _completions = sug);
+    });
   }
 
   int _codeFlat(CodeLineEditingController c) {
@@ -980,7 +1141,8 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       final flat = _codeFlat(c);
       final word = _wordAt(c.text, flat);
       final suffix = comp.substring(word.length);
-      final newText = c.text.substring(0, flat) + suffix + c.text.substring(flat);
+      final newText =
+          c.text.substring(0, flat) + suffix + c.text.substring(flat);
       final lc = _toLC(newText, flat + suffix.length);
       c.text = newText;
       c.selection = CodeLineSelection.collapsed(index: lc.$1, offset: lc.$2);
@@ -1027,16 +1189,13 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       _runProcess = await Process.start(
         tab.lang!.runCommand!,
         [...tab.lang!.runArgs, tab.path],
-        workingDirectory: _p.isWorkspace ? _p.workspacePath : p.dirname(tab.path),
+        workingDirectory:
+            _p.isWorkspace ? _p.workspacePath : p.dirname(tab.path),
       );
-      _runProcess!.stdout
-          .transform(const SystemEncoding().decoder)
-          .listen((d) {
+      _runProcess!.stdout.transform(const SystemEncoding().decoder).listen((d) {
         if (mounted) setState(() => _termLines.addAll(d.split('\n')));
       });
-      _runProcess!.stderr
-          .transform(const SystemEncoding().decoder)
-          .listen((d) {
+      _runProcess!.stderr.transform(const SystemEncoding().decoder).listen((d) {
         if (mounted) setState(() => _termLines.addAll(d.split('\n')));
       });
       _runProcess!.exitCode.then((code) {
@@ -1055,10 +1214,10 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Arborescence ──────────────────────────────────────────────────────────
 
-  Future<List<_ProjNode>> _buildTree(
+  Future<List<ProjectNode>> _buildTree(
       String dir, int depth, List<String> excl) async {
     if (depth > 8) return [];
-    final nodes = <_ProjNode>[];
+    final nodes = <ProjectNode>[];
     try {
       final entities = Directory(dir).listSync()
         ..sort((a, b) {
@@ -1070,7 +1229,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       for (final e in entities) {
         final name = p.basename(e.path);
         if (name.startsWith('.') || excl.any((x) => name == x)) continue;
-        nodes.add(_ProjNode(
+        nodes.add(ProjectNode(
           path: e.path,
           name: name,
           isDir: e is Directory,
@@ -1081,7 +1240,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     return nodes;
   }
 
-  Future<void> _toggleNode(_ProjNode node) async {
+  Future<void> _toggleNode(ProjectNode node) async {
     if (!node.isDir) return;
     if (node.expanded) {
       setState(() => node.expanded = false);
@@ -1097,7 +1256,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Hex ───────────────────────────────────────────────────────────────────
 
-  void _hexSelect(_UTab tab, int offset) {
+  void _hexSelect(EditorTab tab, int offset) {
     if (tab.bytes == null || offset >= tab.bytes!.length) return;
     setState(() => tab.hexSelectedOffset = offset);
     final hex =
@@ -1109,7 +1268,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     _hexScroll(tab, offset);
   }
 
-  void _hexApply(_UTab tab) {
+  void _hexApply(EditorTab tab) {
     final text = tab.hexInputCtrl?.text.trim() ?? '';
     if (text.length != 2) return;
     final val = int.tryParse(text, radix: 16);
@@ -1121,14 +1280,14 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     });
   }
 
-  void _hexNav(_UTab tab, int delta) {
+  void _hexNav(EditorTab tab, int delta) {
     if (tab.bytes == null) return;
     final next = tab.hexSelectedOffset + delta;
     if (next < 0 || next >= tab.bytes!.length) return;
     _hexSelect(tab, next);
   }
 
-  void _hexScroll(_UTab tab, int offset) {
+  void _hexScroll(EditorTab tab, int offset) {
     final sc = tab.hexScrollCtrl;
     if (sc == null || !sc.hasClients) return;
     final row = offset ~/ _hexBytesPerRow;
@@ -1145,38 +1304,535 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     }
   }
 
-  // ── Recherche / Remplacement ──────────────────────────────────────────────
+  // ── Recherche ─────────────────────────────────────────────────────────────
 
-  void _replaceNext() {
+  /// Sélection de l'onglet en décalages dans le texte (début ≤ fin).
+  (int, int) _selectionOf(EditorTab tab) {
+    final code = tab.codeCtrl;
+    final TextSelection sel;
+    if (code != null) {
+      sel = CodeCtrlAdapter(code).value.selection;
+    } else {
+      sel = (tab.textCtrl ?? tab.richCtrl)?.selection ??
+          const TextSelection.collapsed(offset: 0);
+    }
+    if (!sel.isValid) return (0, 0);
+    return (sel.start, sel.end);
+  }
+
+  /// Remplace tout le texte de l'onglet et place la sélection ; l'onglet
+  /// devient « modifié ».
+  void _replaceText(EditorTab tab, String text, int selStart, int selEnd) {
+    final value = TextEditingValue(
+      text: text,
+      selection: TextSelection(baseOffset: selStart, extentOffset: selEnd),
+    );
+    final code = tab.codeCtrl;
+    if (code != null) {
+      CodeCtrlAdapter(code).value = value;
+      code.makeCursorVisible();
+    } else {
+      (tab.textCtrl ?? tab.richCtrl)?.value = value;
+    }
+    setState(() => tab.isDirty = true);
+  }
+
+  void _openSearch({bool replace = false}) {
+    final tab = _p.activeTab;
+    if (tab == null || tab.viewMode == EditorViewMode.hex) return;
+    // Texte sélectionné sur une ligne : motif proposé.
+    final (a, b) = _selectionOf(tab);
+    final selected =
+        b > a && b - a <= 200 ? tab.currentText.substring(a, b) : '';
+    final seed = selected.contains('\n') ? '' : selected;
+    if (_showSearch) {
+      _searchBarKey.currentState?.focus(pattern: seed, replace: replace);
+      return;
+    }
+    setState(() {
+      _showSearch = true;
+      _searchReplace = replace;
+      if (seed.isNotEmpty) _searchQuery = _searchQuery.copyWith(pattern: seed);
+    });
+    _refreshMatches(select: true);
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _showSearch = false;
+      _matches = const [];
+      _matchIndex = -1;
+    });
+    _editorFocus.requestFocus();
+  }
+
+  void _onSearchQuery(TextSearchQuery q) {
+    _searchQuery = q;
+    _refreshMatches(select: true);
+  }
+
+  /// Recalcule les occurrences dans l'onglet actif. Avec [select], la
+  /// première occurrence à partir du curseur est sélectionnée.
+  void _refreshMatches({bool select = false}) {
+    final tab = _p.activeTab;
+    if (!_showSearch || tab == null || tab.viewMode == EditorViewMode.hex) {
+      return;
+    }
+    final matches = TextSearch.findAll(tab.currentText, _searchQuery);
+    // Occurrence courante : celle qui contient le curseur (l'éditeur de
+    // code réduit la sélection à sa fin quand il perd le focus), sinon la
+    // suivante.
+    final (a, _) = _selectionOf(tab);
+    var index = matches.indexWhere((m) => m.start <= a && a <= m.end);
+    if (index < 0) index = TextSearch.indexAtOrAfter(matches, a);
+    setState(() {
+      _matches = matches;
+      _matchIndex = index;
+    });
+    if (select && index >= 0) {
+      _selectRange(tab, matches[index].start, matches[index].end);
+    }
+  }
+
+  /// Va à l'occurrence suivante ([delta] = 1) ou précédente (-1).
+  void _gotoMatch(int delta) {
     final tab = _p.activeTab;
     if (tab == null) return;
-    final q = _searchCtrl.text;
-    final r = _replaceCtrl.text;
-    if (q.isEmpty) return;
-    if (tab.codeCtrl != null) {
-      final c = tab.codeCtrl!;
-      final newText = c.text.replaceFirst(q, r);
-      if (newText != c.text) {
-        c.text = newText;
-        setState(() => tab.isDirty = true);
-      }
-    } else {
-      final ctrl = tab.textCtrl ?? tab.richCtrl;
-      if (ctrl == null) return;
-      final newText = ctrl.text.replaceFirst(q, r);
-      if (newText != ctrl.text) {
-        ctrl.text = newText;
-        setState(() => tab.isDirty = true);
-      }
+    final matches = TextSearch.findAll(tab.currentText, _searchQuery);
+    if (matches.isEmpty) {
+      setState(() {
+        _matches = const [];
+        _matchIndex = -1;
+      });
+      return;
     }
+    final (a, b) = _selectionOf(tab);
+    final onMatch = matches.indexWhere((m) => m.start == a && m.end == b);
+    int index;
+    if (onMatch >= 0) {
+      index = (onMatch + delta) % matches.length;
+    } else if (delta > 0) {
+      index = TextSearch.indexAtOrAfter(matches, b);
+    } else {
+      index = matches.lastIndexWhere((m) => m.end < a);
+      if (index < 0) index = matches.length - 1;
+    }
+    setState(() {
+      _matches = matches;
+      _matchIndex = index;
+    });
+    _selectRange(tab, matches[index].start, matches[index].end,
+        focus: tab.codeCtrl == null);
+  }
+
+  /// Remplace l'occurrence sélectionnée puis passe à la suivante ; sans
+  /// occurrence sélectionnée, va d'abord à la suivante.
+  void _replaceCurrent(String replace) {
+    final tab = _p.activeTab;
+    if (tab == null || tab.isReadOnly) return;
+    final text = tab.currentText;
+    final matches = TextSearch.findAll(text, _searchQuery);
+    final (a, b) = _selectionOf(tab);
+    final i = matches.indexWhere((m) => m.start == a && m.end == b);
+    if (i < 0) {
+      _gotoMatch(1);
+      return;
+    }
+    final m = matches[i];
+    final by = TextSearch.replacementFor(text, m, _searchQuery, replace);
+    final newText = text.replaceRange(m.start, m.end, by);
+    final after = m.start + by.length;
+    _replaceText(tab, newText, after, after);
+    _gotoMatch(1);
+  }
+
+  void _replaceAll(String replace) {
+    final tab = _p.activeTab;
+    if (tab == null || tab.isReadOnly) return;
+    final (newText, count) =
+        TextSearch.replaceAll(tab.currentText, _searchQuery, replace);
+    if (count == 0) return;
+    final (a, _) = _selectionOf(tab);
+    final caret = a.clamp(0, newText.length);
+    _replaceText(tab, newText, caret, caret);
+    _refreshMatches();
+    _snack('$count remplacement${count > 1 ? 's' : ''}');
+  }
+
+  // ── Opérations sur les lignes ─────────────────────────────────────────────
+
+  bool get _canEditLines {
+    final tab = _p.activeTab;
+    return tab != null &&
+        !tab.isReadOnly &&
+        tab.viewMode != EditorViewMode.hex &&
+        !(tab.viewMode == EditorViewMode.markdown && tab.showMdPreview);
+  }
+
+  void _lineOp(LineEdit Function(String text, int start, int end) op) {
+    final tab = _p.activeTab;
+    if (tab == null || !_canEditLines) return;
+    final text = tab.currentText;
+    final (a, b) = _selectionOf(tab);
+    final edit = op(text, a, b);
+    if (edit.text == text) return;
+    _replaceText(tab, edit.text, edit.selectionStart, edit.selectionEnd);
+  }
+
+  LineComment? get _commentSyntax {
+    final tab = _p.activeTab;
+    if (tab == null) return null;
+    if (tab.viewMode == EditorViewMode.markdown) {
+      return LineComment.forLanguage('markdown');
+    }
+    return LineComment.forLanguage(tab.lang?.id);
+  }
+
+  void _toggleComment() {
+    final syntax = _commentSyntax;
+    if (syntax == null) {
+      _snack('Pas de commentaire de ligne pour ce langage');
+      return;
+    }
+    _lineOp((t, a, b) => LineOperations.toggleComment(t, a, b, syntax));
+  }
+
+  void _duplicateLines() => _lineOp(LineOperations.duplicate);
+  void _deleteLines() => _lineOp(LineOperations.delete);
+  void _moveLines(bool up) =>
+      _lineOp((t, a, b) => LineOperations.move(t, a, b, up: up));
+
+  // ── Fichiers : nouveau, ouvrir, enregistrer sous, révéler ─────────────────
+
+  /// Dossier proposé par les sélecteurs : projet, sinon dossier du fichier
+  /// actif.
+  String? get _pickerStart {
+    if (_p.isWorkspace) return _p.workspacePath;
+    final tab = _p.activeTab;
+    return tab == null ? null : p.dirname(tab.path);
+  }
+
+  Future<void> _newFile() async {
+    final path = await ExplorerPicker.saveFile(
+      context,
+      title: 'Nouveau fichier',
+      fileName: 'sans_titre.txt',
+      initialPath: _pickerStart,
+    );
+    if (path == null || !mounted) return;
+    try {
+      final f = File(path);
+      // Un fichier existant (remplacement confirmé dans l'explorateur) est
+      // ouvert tel quel : « Nouveau » ne doit pas effacer son contenu.
+      if (!await f.exists()) await f.create(recursive: true);
+    } on FileSystemException catch (e) {
+      _showErr('Création impossible : ${e.message}');
+      return;
+    }
+    await _openFile(path);
+    final i = _p.indexOfPath(path);
+    if (i >= 0) _enableEdit(i);
+    if (_p.isWorkspace) await _refreshTree();
+  }
+
+  Future<void> _openFiles() async {
+    final paths = await ExplorerPicker.pickFiles(context,
+        title: 'Ouvrir dans l\'éditeur', initialPath: _pickerStart);
+    for (final path in paths) {
+      if (!mounted) return;
+      await _openFile(path);
+    }
+  }
+
+  /// Écrit le texte de l'onglet actif dans un autre fichier, qui le remplace
+  /// dans l'onglet. Le fichier d'origine n'est pas modifié.
+  Future<void> _saveAs() async {
+    final tab = _p.activeTab;
+    if (tab == null || tab.viewMode == EditorViewMode.hex) return;
+    final target = await ExplorerPicker.saveFile(
+      context,
+      fileName: tab.name,
+      initialPath: p.dirname(tab.path),
+    );
+    if (target == null || !mounted || !_p.tabs.contains(tab)) return;
+    if (target == tab.path) {
+      await _save(_p.tabs.indexOf(tab));
+      return;
+    }
+    final text = tab.currentText;
+    try {
+      final bytes = EditorEncodingCodec.encode(text, tab.encoding);
+      await AtomicWrite.bytes(target, bytes);
+      if (tab.viewMode == EditorViewMode.richText && tab.richCtrl != null) {
+        await AtomicWrite.string('$target.fmt', tab.richCtrl!.formattingJson);
+      }
+    } on EditorEncodingException catch (e) {
+      _showErr('$e Choisissez un autre encodage (barre d\'état).');
+      return;
+    } catch (e) {
+      _showErr('Enregistrement impossible : $e');
+      return;
+    }
+    if (!mounted) return;
+    // L'onglet d'origine laisse la place au nouveau fichier, au même rang.
+    final index = _p.tabs.indexOf(tab);
+    final existing = _p.indexOfPath(target);
+    if (existing >= 0) _removeTab(_p.tabs[existing]);
+    await EditorDrafts.delete(tab.path);
+    final cursor = _computeStats(tab).cursor;
+    _removeTab(tab);
+    _p.closedPaths.remove(tab.path);
+    await _openFile(target);
+    final opened = _p.indexOfPath(target);
+    if (opened < 0 || !mounted) return;
+    final moved = _p.tabs.removeAt(opened);
+    final at = index.clamp(0, _p.tabs.length);
+    setState(() {
+      _p.tabs.insert(at, moved);
+      _p.activeTabIndex = at;
+      moved.isReadOnly = false;
+      _syncKb();
+    });
+    _moveCursorTo(moved, cursor.line, cursor.column);
+    _p.tabsChanged();
+    if (_p.isWorkspace) await _refreshTree();
+    _snack('Enregistré sous ${p.basename(target)}');
+  }
+
+  void _revealInExplorer() {
+    final tab = _p.activeTab;
+    if (tab == null) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FileExplorerScreen(initialPath: p.dirname(tab.path)),
+      ),
+    );
+  }
+
+  Future<void> _refreshTree() async {
+    final tree = await _buildTree(_p.workspacePath, 0, _p.ws.excludePatterns);
+    if (mounted) setState(() => _p.tree = tree);
+  }
+
+  // ── Projet : ouverture rapide, recherche ──────────────────────────────────
+
+  Future<void> _quickOpen() async {
+    if (!_p.isWorkspace) {
+      await _openFiles();
+      return;
+    }
+    final root = _p.workspacePath;
+    final files =
+        await ProjectSearch.listFiles(root, exclude: _p.ws.excludePatterns);
+    if (!mounted) return;
+    await showCommandPalette(
+      context,
+      hint: 'Ouvrir un fichier du projet…',
+      items: [
+        for (final f in files)
+          PaletteItem(
+            label: p.basename(f),
+            detail: p.dirname(p.relative(f, from: root)) == '.'
+                ? null
+                : p.dirname(p.relative(f, from: root)),
+            icon: _fileIcon(p.basename(f)),
+            run: () => _openFile(f),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _searchProject() async {
+    if (!_p.isWorkspace) return;
+    final hit = await Navigator.push<ProjectSearchHit>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ProjectSearchScreen(
+          root: _p.workspacePath,
+          exclude: _p.ws.excludePatterns,
+          initialQuery: _searchQuery,
+        ),
+      ),
+    );
+    if (hit == null || !mounted) return;
+    await _openFile(hit.path);
+    final tab = _p.activeTab;
+    if (tab == null || tab.path != hit.path) return;
+    _moveCursorTo(tab, hit.line, hit.column,
+        length: hit.previewEnd - hit.previewStart);
+  }
+
+  // ── Palette de commandes ──────────────────────────────────────────────────
+
+  List<PaletteItem> _commands() {
+    final tab = _p.activeTab;
+    final text = tab != null && tab.viewMode != EditorViewMode.hex;
+    final dirty = tab != null && (tab.isDirty || tab.hexModified);
+    final lines = _canEditLines;
+    return [
+      PaletteItem(
+          label: 'Nouveau fichier…',
+          icon: Icons.note_add_outlined,
+          shortcut: 'Ctrl+N',
+          run: _newFile),
+      PaletteItem(
+          label: 'Ouvrir un fichier…',
+          icon: Icons.folder_open_outlined,
+          shortcut: _p.isWorkspace ? 'Ctrl+P' : 'Ctrl+O',
+          run: _p.isWorkspace ? _quickOpen : _openFiles),
+      PaletteItem(
+          label: 'Sauvegarder',
+          icon: Icons.save_rounded,
+          shortcut: 'Ctrl+S',
+          enabled: dirty,
+          run: _save),
+      PaletteItem(
+          label: 'Enregistrer sous…',
+          icon: Icons.save_as_outlined,
+          shortcut: 'Ctrl+Maj+S',
+          enabled: text,
+          run: _saveAs),
+      PaletteItem(
+          label: 'Révéler dans l\'explorateur',
+          icon: Icons.folder_outlined,
+          enabled: tab != null,
+          run: _revealInExplorer),
+      PaletteItem(
+          label: 'Fermer l\'onglet',
+          icon: Icons.close_rounded,
+          shortcut: 'Ctrl+W',
+          enabled: tab != null,
+          run: _closeActiveTab),
+      PaletteItem(
+          label: 'Rouvrir le dernier onglet fermé',
+          icon: Icons.restore_rounded,
+          shortcut: 'Ctrl+Maj+T',
+          enabled: _p.closedPaths.isNotEmpty,
+          run: _reopenClosed),
+      PaletteItem(
+          label: 'Rechercher',
+          icon: Icons.search_rounded,
+          shortcut: 'Ctrl+F',
+          enabled: text,
+          run: _openSearch),
+      PaletteItem(
+          label: 'Remplacer',
+          icon: Icons.find_replace_rounded,
+          shortcut: 'Ctrl+H',
+          enabled: text && !tab.isReadOnly,
+          run: () => _openSearch(replace: true)),
+      if (_p.isWorkspace)
+        PaletteItem(
+            label: 'Rechercher dans le projet…',
+            icon: Icons.manage_search_rounded,
+            shortcut: 'Ctrl+Maj+F',
+            run: _searchProject),
+      PaletteItem(
+          label: 'Aller à la ligne…',
+          icon: Icons.low_priority_rounded,
+          shortcut: 'Ctrl+G',
+          enabled: text,
+          run: _showGoToLine),
+      PaletteItem(
+          label: 'Commenter / décommenter les lignes',
+          icon: Icons.comment_outlined,
+          shortcut: 'Ctrl+/',
+          enabled: lines && _commentSyntax != null,
+          run: _toggleComment),
+      PaletteItem(
+          label: 'Dupliquer les lignes',
+          icon: Icons.copy_all_outlined,
+          shortcut: 'Ctrl+Maj+D',
+          enabled: lines,
+          run: _duplicateLines),
+      PaletteItem(
+          label: 'Monter les lignes',
+          icon: Icons.arrow_upward_rounded,
+          shortcut: 'Alt+↑',
+          enabled: lines,
+          run: () => _moveLines(true)),
+      PaletteItem(
+          label: 'Descendre les lignes',
+          icon: Icons.arrow_downward_rounded,
+          shortcut: 'Alt+↓',
+          enabled: lines,
+          run: () => _moveLines(false)),
+      PaletteItem(
+          label: 'Supprimer les lignes',
+          icon: Icons.backspace_outlined,
+          shortcut: 'Ctrl+Maj+K',
+          enabled: lines,
+          run: _deleteLines),
+      PaletteItem(
+          label: 'Passer en édition',
+          icon: Icons.edit_outlined,
+          enabled: tab != null && tab.isReadOnly,
+          run: () => _enableEdit(_p.activeTabIndex)),
+      PaletteItem(
+          label: 'Changer le langage…',
+          icon: Icons.code_rounded,
+          enabled: text,
+          run: _showLanguagePicker),
+      PaletteItem(
+          label: 'Changer l\'encodage…',
+          icon: Icons.translate_rounded,
+          enabled: text,
+          run: _showEncodingPicker),
+      for (final (mode, label, icon) in const [
+        (EditorViewMode.code, 'Code', Icons.code_rounded),
+        (EditorViewMode.markdown, 'Markdown', Icons.article_rounded),
+        (EditorViewMode.text, 'Texte', Icons.text_snippet_outlined),
+        (
+          EditorViewMode.richText,
+          'Texte enrichi',
+          Icons.format_color_text_rounded
+        ),
+        (EditorViewMode.hex, 'Hexadécimal', Icons.memory_rounded),
+      ])
+        PaletteItem(
+            label: 'Afficher en : $label',
+            icon: icon,
+            enabled: tab != null && tab.viewMode != mode,
+            run: () => _switchViewMode(mode)),
+      if (tab?.lang?.isRunnable == true)
+        PaletteItem(
+            label: 'Exécuter le fichier',
+            icon: Icons.play_arrow_rounded,
+            run: _run),
+      PaletteItem(
+          label: _showTerminal ? 'Masquer le terminal' : 'Afficher le terminal',
+          icon: Icons.terminal_rounded,
+          run: () => setState(() => _showTerminal = !_showTerminal)),
+      if (_p.isWorkspace)
+        PaletteItem(
+            label: 'Paramètres du projet',
+            icon: Icons.tune_rounded,
+            run: _openWsSettings),
+    ];
+  }
+
+  Future<void> _showPalette() =>
+      showCommandPalette(context, items: _commands());
+
+  void _closeActiveTab() {
+    if (_p.activeTab != null) _closeTab(_p.activeTabIndex);
+  }
+
+  void _cycleTab(int delta) {
+    if (_p.tabs.length < 2) return;
+    setState(() {
+      _p.activeTabIndex = (_p.activeTabIndex + delta) % _p.tabs.length;
+      _syncKb();
+    });
   }
 
   // ── Utilitaires ───────────────────────────────────────────────────────────
 
   void _snack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(msg), duration: const Duration(seconds: 1)));
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(msg), duration: const Duration(seconds: 1)));
   }
 
   void _showErr(String msg) {
@@ -1191,7 +1847,8 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   @override
   Widget build(BuildContext context) {
-    context.watch<UnifiedEditorProvider>(); // rebuild quand les onglets changent
+    context
+        .watch<UnifiedEditorProvider>(); // rebuild quand les onglets changent
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final settings = context.watch<SettingsService>();
@@ -1200,41 +1857,132 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
         Platform.isAndroid &&
         (_p.ws.useCustomKeyboard ?? settings.useCustomKeyboard);
 
-    return Scaffold(
-      backgroundColor: theme.scaffoldBackgroundColor,
-      appBar: _buildAppBar(theme),
-      body: Column(
-        children: [
-          if (_p.tabs.isNotEmpty) _buildTabBar(theme),
-          Expanded(
-            child: Row(
-              children: [
-                if (_p.isWorkspace && _p.showTree) _buildProjectPanel(theme),
-                Expanded(
-                  child: Column(
-                    children: [
-                      if (_showSearch) _buildSearchBar(theme),
-                      Expanded(child: _buildEditorContent(theme, isDark)),
-                      if (_completions.isNotEmpty) _buildCompletionBar(theme),
-                      if (_showTerminal)
-                        TerminalPanel(
-                          output: _termLines,
-                          onClear: () => setState(() => _termLines.clear()),
-                          onClose: () => setState(() => _showTerminal = false),
-                          onStop: _runProcess != null ? _stopProcess : null,
-                        ),
-                    ],
+    // Police de code des Paramètres appliquée à chaud (hors projet, dont
+    // les réglages priment).
+    if (!_p.isWorkspace) {
+      final family = _fontFamilyKey(settings.codeFontFamily);
+      if (_p.ws.fontFamily != family ||
+          _p.ws.fontSize != settings.codeFontSize) {
+        _p.ws =
+            _p.ws.copyWith(fontFamily: family, fontSize: settings.codeFontSize);
+      }
+    }
+
+    final tab = _p.activeTab;
+    final statsSource = tab?.codeCtrl ?? tab?.textCtrl ?? tab?.richCtrl ?? tab;
+    if (!identical(statsSource, _statsSource)) {
+      // Autre onglet ou autre mode : recalcul hors de la construction.
+      _statsSource = statsSource;
+      _scheduleStats();
+    }
+
+    return CallbackShortcuts(
+      bindings: _shortcuts(),
+      child: Scaffold(
+        backgroundColor: theme.scaffoldBackgroundColor,
+        appBar: _buildAppBar(theme),
+        body: Column(
+          children: [
+            if (_p.tabs.isNotEmpty) _buildTabBar(theme),
+            Expanded(
+              child: Row(
+                children: [
+                  if (_p.isWorkspace && _p.showTree) _buildProjectPanel(theme),
+                  Expanded(
+                    child: Column(
+                      children: [
+                        if (_showSearch && tab != null)
+                          EditorSearchBar(
+                            key: _searchBarKey,
+                            initialQuery: _searchQuery,
+                            initialReplace: _searchReplace,
+                            canReplace: !tab.isReadOnly,
+                            matchIndex: _matchIndex,
+                            matchCount: _matches.length,
+                            onQueryChanged: _onSearchQuery,
+                            onNext: () => _gotoMatch(1),
+                            onPrevious: () => _gotoMatch(-1),
+                            onReplace: _replaceCurrent,
+                            onReplaceAll: _replaceAll,
+                            onClose: _closeSearch,
+                          ),
+                        Expanded(child: _buildEditorContent(theme, isDark)),
+                        if (_completions.isNotEmpty) _buildCompletionBar(theme),
+                        if (_showTerminal)
+                          TerminalPanel(
+                            output: _termLines,
+                            onClear: () => setState(() => _termLines.clear()),
+                            onClose: () =>
+                                setState(() => _showTerminal = false),
+                            onStop: _runProcess != null ? _stopProcess : null,
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          if (useKb && _kbAdapter != null)
-            CustomKeyboard(
-              focusNode: _editorFocus,
-              controller: _kbAdapter,
-            ),
-        ],
+            if (tab != null && tab.viewMode != EditorViewMode.hex)
+              _buildStatusBar(tab),
+            if (useKb && _kbAdapter != null)
+              CustomKeyboard(
+                focusNode: _editorFocus,
+                controller: _kbAdapter,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Raccourcis clavier de l'écran. En mode code, l'éditeur traite d'abord
+  /// les siens (voir `shortcutOverrideActions` de [_buildCodeView]).
+  Map<ShortcutActivator, VoidCallback> _shortcuts() {
+    SingleActivator ctrl(LogicalKeyboardKey k, {bool shift = false}) =>
+        SingleActivator(k, control: true, shift: shift);
+    return {
+      ctrl(LogicalKeyboardKey.keyS): _save,
+      ctrl(LogicalKeyboardKey.keyS, shift: true): _saveAs,
+      ctrl(LogicalKeyboardKey.keyN): _newFile,
+      ctrl(LogicalKeyboardKey.keyO): _openFiles,
+      ctrl(LogicalKeyboardKey.keyP): _quickOpen,
+      ctrl(LogicalKeyboardKey.keyP, shift: true): _showPalette,
+      const SingleActivator(LogicalKeyboardKey.f1): _showPalette,
+      ctrl(LogicalKeyboardKey.keyW): _closeActiveTab,
+      ctrl(LogicalKeyboardKey.keyT, shift: true): _reopenClosed,
+      ctrl(LogicalKeyboardKey.tab): () => _cycleTab(1),
+      ctrl(LogicalKeyboardKey.tab, shift: true): () => _cycleTab(-1),
+      ctrl(LogicalKeyboardKey.keyF): _openSearch,
+      ctrl(LogicalKeyboardKey.keyH): () => _openSearch(replace: true),
+      ctrl(LogicalKeyboardKey.keyF, shift: true): _searchProject,
+      const SingleActivator(LogicalKeyboardKey.f3): () => _gotoMatch(1),
+      const SingleActivator(LogicalKeyboardKey.f3, shift: true): () =>
+          _gotoMatch(-1),
+      ctrl(LogicalKeyboardKey.keyG): _showGoToLine,
+      ctrl(LogicalKeyboardKey.slash): _toggleComment,
+      ctrl(LogicalKeyboardKey.keyD, shift: true): _duplicateLines,
+      ctrl(LogicalKeyboardKey.keyK, shift: true): _deleteLines,
+      const SingleActivator(LogicalKeyboardKey.arrowUp, alt: true): () =>
+          _moveLines(true),
+      const SingleActivator(LogicalKeyboardKey.arrowDown, alt: true): () =>
+          _moveLines(false),
+    };
+  }
+
+  Widget _buildStatusBar(EditorTab tab) {
+    return ValueListenableBuilder<_DocStats>(
+      valueListenable: _stats,
+      builder: (_, stats, __) => EditorStatusBar(
+        cursor: stats.cursor,
+        lineCount: stats.lineCount,
+        charCount: stats.charCount,
+        encoding: tab.encoding,
+        language: tab.lang,
+        mode: tab.viewMode,
+        dirty: tab.isDirty,
+        onGoToLineTap: _showGoToLine,
+        onEncodingTap: _showEncodingPicker,
+        onLanguageTap: _showLanguagePicker,
       ),
     );
   }
@@ -1269,8 +2017,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
             if (!tab.isReadOnly)
               Container(
                 margin: const EdgeInsets.only(left: 4),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                 decoration: BoxDecoration(
                   color: AppColors.success.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(4),
@@ -1298,10 +2045,10 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
               _modeItem(EditorViewMode.code, Icons.code_rounded, 'Code', tab),
               _modeItem(EditorViewMode.markdown, Icons.article_rounded,
                   'Markdown', tab),
-              _modeItem(
-                  EditorViewMode.text, Icons.text_snippet_outlined, 'Texte', tab),
-              _modeItem(EditorViewMode.richText, Icons.format_color_text_rounded,
-                  'Texte enrichi', tab),
+              _modeItem(EditorViewMode.text, Icons.text_snippet_outlined,
+                  'Texte', tab),
+              _modeItem(EditorViewMode.richText,
+                  Icons.format_color_text_rounded, 'Texte enrichi', tab),
               _modeItem(
                   EditorViewMode.hex, Icons.memory_rounded, 'Hexadécimal', tab),
             ],
@@ -1315,16 +2062,17 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
             onPressed: () =>
                 setState(() => tab.showMdPreview = !tab.showMdPreview),
           ),
-        IconButton(
-          icon: const Icon(Icons.search_rounded, size: 20),
-          onPressed: () => setState(() => _showSearch = !_showSearch),
-        ),
+        if (tab != null && tab.viewMode != EditorViewMode.hex)
+          IconButton(
+            icon: const Icon(Icons.search_rounded, size: 20),
+            tooltip: 'Rechercher (Ctrl+F)',
+            onPressed: _showSearch ? _closeSearch : _openSearch,
+          ),
         IconButton(
           icon: const Icon(Icons.save_rounded, size: 20),
           tooltip: 'Sauvegarder',
-          onPressed: (tab?.isDirty == true || tab?.hexModified == true)
-              ? _save
-              : null,
+          onPressed:
+              (tab?.isDirty == true || tab?.hexModified == true) ? _save : null,
         ),
         if (tab?.lang?.isRunnable == true)
           IconButton(
@@ -1333,23 +2081,74 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
             tooltip: 'Exécuter',
             onPressed: _run,
           ),
-        IconButton(
-          icon: const Icon(Icons.terminal_rounded, size: 20),
-          tooltip: 'Terminal',
-          onPressed: () => setState(() => _showTerminal = !_showTerminal),
-        ),
+        _buildMoreMenu(tab),
+      ],
+    );
+  }
+
+  /// Menu ⋮ : fichiers, lignes, outils. Les mêmes actions sont dans la
+  /// palette de commandes.
+  Widget _buildMoreMenu(EditorTab? tab) {
+    final text = tab != null && tab.viewMode != EditorViewMode.hex;
+    final lines = _canEditLines;
+    PopupMenuEntry<VoidCallback> item(
+            IconData icon, String label, VoidCallback action,
+            {bool enabled = true}) =>
+        PopupMenuItem<VoidCallback>(
+          value: action,
+          enabled: enabled,
+          height: 40,
+          child: Row(children: [
+            Icon(icon, size: 18),
+            const SizedBox(width: 12),
+            Expanded(child: Text(label)),
+          ]),
+        );
+    return PopupMenuButton<VoidCallback>(
+      tooltip: 'Plus d\'actions',
+      icon: const Icon(Icons.more_vert_rounded, size: 20),
+      onSelected: (action) => action(),
+      itemBuilder: (_) => [
+        item(Icons.bolt_rounded, 'Palette de commandes', _showPalette),
+        const PopupMenuDivider(),
+        item(Icons.note_add_outlined, 'Nouveau fichier…', _newFile),
+        item(Icons.folder_open_outlined, 'Ouvrir…',
+            _p.isWorkspace ? _quickOpen : _openFiles),
+        item(Icons.save_as_outlined, 'Enregistrer sous…', _saveAs,
+            enabled: text),
+        item(Icons.folder_outlined, 'Révéler dans l\'explorateur',
+            _revealInExplorer,
+            enabled: tab != null),
         if (_p.isWorkspace)
-          IconButton(
-            icon: const Icon(Icons.tune_rounded, size: 20),
-            tooltip: 'Paramètres du workspace',
-            onPressed: _openWsSettings,
-          ),
+          item(Icons.manage_search_rounded, 'Rechercher dans le projet…',
+              _searchProject),
+        if (lines) ...[
+          const PopupMenuDivider(),
+          item(Icons.comment_outlined, 'Commenter les lignes', _toggleComment,
+              enabled: _commentSyntax != null),
+          item(
+              Icons.copy_all_outlined, 'Dupliquer les lignes', _duplicateLines),
+          item(Icons.arrow_upward_rounded, 'Monter les lignes',
+              () => _moveLines(true)),
+          item(Icons.arrow_downward_rounded, 'Descendre les lignes',
+              () => _moveLines(false)),
+          item(Icons.backspace_outlined, 'Supprimer les lignes', _deleteLines),
+        ],
+        const PopupMenuDivider(),
+        item(Icons.low_priority_rounded, 'Aller à la ligne…', _showGoToLine,
+            enabled: text),
+        item(
+            Icons.terminal_rounded,
+            _showTerminal ? 'Masquer le terminal' : 'Terminal',
+            () => setState(() => _showTerminal = !_showTerminal)),
+        if (_p.isWorkspace)
+          item(Icons.tune_rounded, 'Paramètres du projet', _openWsSettings),
       ],
     );
   }
 
   PopupMenuItem<EditorViewMode> _modeItem(
-      EditorViewMode mode, IconData icon, String label, _UTab tab) {
+      EditorViewMode mode, IconData icon, String label, EditorTab tab) {
     return PopupMenuItem(
       value: mode,
       child: Row(children: [
@@ -1367,73 +2166,25 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   // ── Onglets ───────────────────────────────────────────────────────────────
 
   Widget _buildTabBar(ThemeData theme) {
-    return Container(
-      height: 36,
-      color: theme.colorScheme.surface,
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        itemCount: _p.tabs.length,
-        itemBuilder: (_, i) {
-          final tab = _p.tabs[i];
-          final isActive = i == _p.activeTabIndex;
-          return GestureDetector(
-            onTap: () {
-              if (_p.activeTabIndex == i) return;
-              setState(() {
-                _p.activeTabIndex = i;
-                _syncKb();
-              });
-            },
-            onDoubleTap: () => _enableEdit(i),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 150),
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                color: isActive
-                    ? theme.scaffoldBackgroundColor
-                    : Colors.transparent,
-                border: Border(
-                  bottom: BorderSide(
-                    color: isActive ? AppColors.accent : Colors.transparent,
-                    width: 2,
-                  ),
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (tab.isDirty || tab.hexModified)
-                    Container(
-                      width: 6,
-                      height: 6,
-                      margin: const EdgeInsets.only(right: 4),
-                      decoration: const BoxDecoration(
-                          color: Colors.orange, shape: BoxShape.circle),
-                    ),
-                  if (tab.isReadOnly)
-                    const Padding(
-                      padding: EdgeInsets.only(right: 3),
-                      child: Icon(Icons.lock_outline_rounded, size: 10),
-                    ),
-                  Text(
-                    tab.name,
-                    style: theme.textTheme.labelMedium?.copyWith(
-                      color: isActive
-                          ? null
-                          : theme.textTheme.bodySmall?.color,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: () => _closeTab(i),
-                    child: const Icon(Icons.close_rounded, size: 14),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
+    return EditorTabBar(
+      tabs: [
+        for (final t in _p.tabs)
+          EditorTabInfo(
+            path: t.path,
+            name: t.name,
+            isDirty: t.isDirty || t.hexModified,
+            isReadOnly: t.isReadOnly,
+          ),
+      ],
+      activeIndex: _p.activeTabIndex,
+      onSelect: (i) => setState(() {
+        _p.activeTabIndex = i;
+        _syncKb();
+      }),
+      onDoubleTap: _enableEdit,
+      onClose: _closeTab,
+      onAction: _handleTabAction,
+      canReopenClosed: _p.closedPaths.isNotEmpty,
     );
   }
 
@@ -1477,7 +2228,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     );
   }
 
-  List<Widget> _buildTreeNodes(List<_ProjNode> nodes, ThemeData theme) {
+  List<Widget> _buildTreeNodes(List<ProjectNode> nodes, ThemeData theme) {
     final widgets = <Widget>[];
     for (final node in nodes) {
       widgets.add(_buildTreeNode(node, theme));
@@ -1488,7 +2239,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     return widgets;
   }
 
-  Widget _buildTreeNode(_ProjNode node, ThemeData theme) {
+  Widget _buildTreeNode(ProjectNode node, ThemeData theme) {
     final isActive = _p.activeTab?.path == node.path;
     return InkWell(
       onTap: () async {
@@ -1511,9 +2262,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
                       : Icons.folder_rounded)
                   : _fileIcon(node.name),
               size: 14,
-              color: node.isDir
-                  ? AppColors.colorFolder
-                  : _fileColor(node.name),
+              color: node.isDir ? AppColors.colorFolder : _fileColor(node.name),
             ),
             const SizedBox(width: 5),
             Expanded(
@@ -1522,8 +2271,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: isActive ? AppColors.accent : null,
-                  fontWeight:
-                      isActive ? FontWeight.w600 : FontWeight.normal,
+                  fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
                 ),
               ),
             ),
@@ -1551,7 +2299,9 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
         return Icons.data_object_rounded;
       default:
         final lang = LanguageRegistry.instance.forExtension(ext);
-        return lang != null ? Icons.code_rounded : Icons.insert_drive_file_outlined;
+        return lang != null
+            ? Icons.code_rounded
+            : Icons.insert_drive_file_outlined;
     }
   }
 
@@ -1570,8 +2320,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.description_outlined,
-                size: 64,
-                color: theme.iconTheme.color?.withValues(alpha: 0.1)),
+                size: 64, color: theme.iconTheme.color?.withValues(alpha: 0.1)),
             const SizedBox(height: 12),
             Text(
               _p.isWorkspace
@@ -1602,7 +2351,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Mode Code ─────────────────────────────────────────────────────────────
 
-  Widget _buildCodeView(_UTab tab, ThemeData theme, bool isDark) {
+  Widget _buildCodeView(EditorTab tab, ThemeData theme, bool isDark) {
     final lang = tab.lang;
     final codeTheme = CodeHighlightTheme(
       languages: {
@@ -1628,13 +2377,40 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
         codeTheme: codeTheme,
       ),
       wordWrap: _p.ws.wordWrap,
+      indicatorBuilder: _p.ws.showLineNumbers
+          ? (context, editingController, chunkController, notifier) =>
+              DefaultCodeLineNumber(
+                controller: editingController,
+                notifier: notifier,
+                textStyle: TextStyle(
+                  fontSize: _p.ws.fontSize * 0.85,
+                  color: theme.disabledColor,
+                ),
+                focusedTextStyle: TextStyle(
+                  fontSize: _p.ws.fontSize * 0.85,
+                  color: theme.textTheme.bodyLarge?.color,
+                ),
+              )
+          : null,
       shortcutsActivatorsBuilder: const DefaultCodeShortcutsActivatorsBuilder(),
+      // Raccourcis de l'éditeur de code redirigés vers ceux de l'écran :
+      // même comportement dans tous les modes.
+      shortcutOverrideActions: {
+        CodeShortcutSaveIntent:
+            CallbackAction<CodeShortcutSaveIntent>(onInvoke: (_) => _save()),
+        CodeShortcutFindIntent: CallbackAction<CodeShortcutFindIntent>(
+            onInvoke: (_) => _openSearch()),
+        CodeShortcutReplaceIntent: CallbackAction<CodeShortcutReplaceIntent>(
+            onInvoke: (_) => _openSearch(replace: true)),
+        CodeShortcutCommentIntent: CallbackAction<CodeShortcutCommentIntent>(
+            onInvoke: (_) => _toggleComment()),
+      },
     );
   }
 
   // ── Mode Markdown ─────────────────────────────────────────────────────────
 
-  Widget _buildMarkdownView(_UTab tab, ThemeData theme, bool isDark) {
+  Widget _buildMarkdownView(EditorTab tab, ThemeData theme, bool isDark) {
     if (tab.showMdPreview || tab.isReadOnly) {
       return Markdown(
         data: tab.codeCtrl?.text ?? tab.content,
@@ -1654,24 +2430,40 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   }
 
   MarkdownStyleSheet _mdStyleSheet(ThemeData t, bool isDark) {
-    final txt = isDark ? Colors.white.withAlpha(222) : Colors.black.withAlpha(222);
-    final codeColor = isDark ? const Color(0xFF89B4FA) : const Color(0xFF1565C0);
+    final txt =
+        isDark ? Colors.white.withAlpha(222) : Colors.black.withAlpha(222);
+    final codeColor =
+        isDark ? const Color(0xFF89B4FA) : const Color(0xFF1565C0);
     final codeBg = isDark ? const Color(0xFF313244) : const Color(0xFFEEEEEE);
     final s = context.read<SettingsService>();
     final mdBase = _googleFontStyle(s.markdownFontFamily,
         size: s.markdownFontSize.toDouble(), color: txt, height: 1.6);
     return MarkdownStyleSheet(
-      h1: mdBase.copyWith(fontSize: s.markdownFontSize * 1.8, fontWeight: FontWeight.bold, height: 1.4),
-      h2: mdBase.copyWith(fontSize: s.markdownFontSize * 1.45, fontWeight: FontWeight.bold, height: 1.4),
-      h3: mdBase.copyWith(fontSize: s.markdownFontSize * 1.2, fontWeight: FontWeight.bold, height: 1.4),
+      h1: mdBase.copyWith(
+          fontSize: s.markdownFontSize * 1.8,
+          fontWeight: FontWeight.bold,
+          height: 1.4),
+      h2: mdBase.copyWith(
+          fontSize: s.markdownFontSize * 1.45,
+          fontWeight: FontWeight.bold,
+          height: 1.4),
+      h3: mdBase.copyWith(
+          fontSize: s.markdownFontSize * 1.2,
+          fontWeight: FontWeight.bold,
+          height: 1.4),
       p: mdBase,
-      code: TextStyle(fontFamily: 'monospace', fontSize: s.markdownFontSize * 0.87, color: codeColor, backgroundColor: codeBg),
+      code: TextStyle(
+          fontFamily: 'monospace',
+          fontSize: s.markdownFontSize * 0.87,
+          color: codeColor,
+          backgroundColor: codeBg),
       codeblockDecoration:
           BoxDecoration(color: codeBg, borderRadius: BorderRadius.circular(8)),
       blockquoteDecoration: BoxDecoration(
         color: isDark ? const Color(0xFF1E1E2E) : const Color(0xFFF0F0F0),
         borderRadius: BorderRadius.circular(4),
-        border: const Border(left: BorderSide(color: Color(0xFF89B4FA), width: 4)),
+        border:
+            const Border(left: BorderSide(color: Color(0xFF89B4FA), width: 4)),
       ),
       blockquote: TextStyle(
           color: isDark ? Colors.white60 : Colors.black54,
@@ -1679,28 +2471,26 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
       listBullet: TextStyle(color: t.colorScheme.primary),
       tableHead: TextStyle(fontWeight: FontWeight.bold, color: txt),
       tableBody: TextStyle(color: txt),
-      tableBorder: TableBorder.all(color: isDark ? Colors.white24 : Colors.black12),
+      tableBorder:
+          TableBorder.all(color: isDark ? Colors.white24 : Colors.black12),
     );
   }
 
   // ── Mode Texte ────────────────────────────────────────────────────────────
 
-  Widget _buildTextView(_UTab tab, ThemeData theme) {
+  Widget _buildTextView(EditorTab tab, ThemeData theme) {
     final s = context.read<SettingsService>();
     final style = _googleFontStyle(
       s.textFontFamily,
       size: s.textFontSize.toDouble(),
       color: theme.textTheme.bodyLarge?.color,
     );
-    if (tab.isReadOnly) {
-      return SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: SelectableText(tab.content, style: style),
-      );
-    }
+    // Lecture seule : champ non modifiable plutôt que SelectableText, pour
+    // que recherche et « Aller à la ligne » puissent sélectionner.
     return TextField(
       controller: tab.textCtrl,
       focusNode: _editorFocus,
+      readOnly: tab.isReadOnly,
       maxLines: null,
       keyboardType: TextInputType.multiline,
       style: style,
@@ -1714,7 +2504,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Mode Texte enrichi ────────────────────────────────────────────────────
 
-  Widget _buildRichView(_UTab tab, ThemeData theme) {
+  Widget _buildRichView(EditorTab tab, ThemeData theme) {
     final s = context.read<SettingsService>();
     final richStyle = _googleFontStyle(
       s.richFontFamily,
@@ -1733,9 +2523,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
                           context: context,
                           withComposing: false,
                         ) ??
-                        TextSpan(
-                            text: tab.content,
-                            style: richStyle),
+                        TextSpan(text: tab.content, style: richStyle),
                   ),
                 )
               : TextField(
@@ -1756,7 +2544,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     );
   }
 
-  Widget _buildRichToolbar(_UTab tab, ThemeData theme) {
+  Widget _buildRichToolbar(EditorTab tab, ThemeData theme) {
     return Container(
       height: 44,
       color: theme.colorScheme.surface,
@@ -1766,19 +2554,19 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
           _FmtBtn(
               icon: Icons.format_bold,
               tip: 'Gras',
-              onTap: () => _applyFmt(tab, _RichFmt.bold)),
+              onTap: () => _applyFmt(tab, RichFmt.bold)),
           _FmtBtn(
               icon: Icons.format_italic,
               tip: 'Italique',
-              onTap: () => _applyFmt(tab, _RichFmt.italic)),
+              onTap: () => _applyFmt(tab, RichFmt.italic)),
           _FmtBtn(
               icon: Icons.format_underlined,
               tip: 'Souligné',
-              onTap: () => _applyFmt(tab, _RichFmt.underline)),
+              onTap: () => _applyFmt(tab, RichFmt.underline)),
           _FmtBtn(
               icon: Icons.format_strikethrough,
               tip: 'Barré',
-              onTap: () => _applyFmt(tab, _RichFmt.strikethrough)),
+              onTap: () => _applyFmt(tab, RichFmt.strikethrough)),
           const VerticalDivider(width: 16),
           Tooltip(
             message: 'Couleur du texte',
@@ -1807,7 +2595,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     );
   }
 
-  void _applyFmt(_UTab tab, _RichFmt fmt) {
+  void _applyFmt(EditorTab tab, RichFmt fmt) {
     final ctrl = tab.richCtrl;
     if (ctrl == null) return;
     final sel = ctrl.selection;
@@ -1816,7 +2604,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     setState(() => tab.isDirty = true);
   }
 
-  void _clearFmt(_UTab tab) {
+  void _clearFmt(EditorTab tab) {
     final ctrl = tab.richCtrl;
     if (ctrl == null) return;
     final sel = ctrl.selection;
@@ -1825,11 +2613,18 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     setState(() => tab.isDirty = true);
   }
 
-  Future<void> _pickColor(_UTab tab) async {
+  Future<void> _pickColor(EditorTab tab) async {
     const colors = [
-      Colors.red, Colors.orange, Colors.yellow, Colors.green,
-      Colors.blue, Colors.purple, Colors.pink, Colors.teal,
-      Colors.white, Colors.black,
+      Colors.red,
+      Colors.orange,
+      Colors.yellow,
+      Colors.green,
+      Colors.blue,
+      Colors.purple,
+      Colors.pink,
+      Colors.teal,
+      Colors.white,
+      Colors.black,
     ];
     final picked = await showDialog<Color>(
       context: context,
@@ -1874,7 +2669,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 
   // ── Mode Hexadécimal ──────────────────────────────────────────────────────
 
-  Widget _buildHexView(_UTab tab, ThemeData theme) {
+  Widget _buildHexView(EditorTab tab, ThemeData theme) {
     if (tab.bytes == null) {
       return const Center(child: CircularProgressIndicator());
     }
@@ -1914,7 +2709,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   }
 
   /// Bandeau affiché quand seul le début d'un gros fichier est chargé.
-  Widget _buildHexTruncatedBanner(_UTab tab, ThemeData theme) {
+  Widget _buildHexTruncatedBanner(EditorTab tab, ThemeData theme) {
     return Container(
       width: double.infinity,
       color: AppColors.warning.withValues(alpha: 0.15),
@@ -1967,7 +2762,7 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     );
   }
 
-  Widget _buildHexRow(_UTab tab, int row, ThemeData theme) {
+  Widget _buildHexRow(EditorTab tab, int row, ThemeData theme) {
     final bytes = tab.bytes!;
     final start = row * _hexBytesPerRow;
     final end = math.min(start + _hexBytesPerRow, bytes.length);
@@ -1983,7 +2778,8 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
     return Container(
       height: 28,
       padding: const EdgeInsets.symmetric(horizontal: 8),
-      color: row.isOdd ? theme.colorScheme.surface.withValues(alpha: 0.4) : null,
+      color:
+          row.isOdd ? theme.colorScheme.surface.withValues(alpha: 0.4) : null,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
@@ -2037,22 +2833,27 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
   }
 
   Color _hexColor(int byte, ThemeData theme) {
-    final base = theme.textTheme.bodyMedium?.color ?? theme.colorScheme.onSurface;
+    final base =
+        theme.textTheme.bodyMedium?.color ?? theme.colorScheme.onSurface;
     if (byte == 0x00) return base.withValues(alpha: 0.25);
     if (byte == 0xFF) return AppColors.warning.withValues(alpha: 0.8);
-    if (byte < 0x20 || byte == 0x7F) return AppColors.info.withValues(alpha: 0.8);
+    if (byte < 0x20 || byte == 0x7F) {
+      return AppColors.info.withValues(alpha: 0.8);
+    }
     return base;
   }
 
-  Widget _buildHexEditBar(_UTab tab, ThemeData theme) {
+  Widget _buildHexEditBar(EditorTab tab, ThemeData theme) {
     final bytes = tab.bytes!;
     final offset = tab.hexSelectedOffset;
     if (offset < 0 || offset >= bytes.length) return const SizedBox.shrink();
     final byte = bytes[offset];
     final dec = byte.toString().padLeft(3, ' ');
-    final char = (byte >= 0x20 && byte < 0x7F) ? String.fromCharCode(byte) : '·';
+    final char =
+        (byte >= 0x20 && byte < 0x7F) ? String.fromCharCode(byte) : '·';
     final hs = context.read<SettingsService>();
-    final mono = _googleFontStyle(hs.hexFontFamily, size: hs.hexFontSize.toDouble());
+    final mono =
+        _googleFontStyle(hs.hexFontFamily, size: hs.hexFontSize.toDouble());
 
     return Container(
       color: theme.colorScheme.surface,
@@ -2136,54 +2937,10 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
               ),
               IconButton(
                 icon: const Icon(Icons.chevron_right_rounded),
-                onPressed: offset < bytes.length - 1
-                    ? () => _hexNav(tab, 1)
-                    : null,
+                onPressed:
+                    offset < bytes.length - 1 ? () => _hexNav(tab, 1) : null,
               ),
             ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Barre de recherche ────────────────────────────────────────────────────
-
-  Widget _buildSearchBar(ThemeData theme) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: theme.colorScheme.surface,
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _searchCtrl,
-              decoration: const InputDecoration(
-                hintText: 'Rechercher…',
-                isDense: true,
-                prefixIcon: Icon(Icons.search_rounded, size: 16),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: TextField(
-              controller: _replaceCtrl,
-              decoration: const InputDecoration(
-                hintText: 'Remplacer…',
-                isDense: true,
-                prefixIcon: Icon(Icons.find_replace_rounded, size: 16),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          TextButton(
-            onPressed: _replaceNext,
-            child: const Text('Remplacer', style: TextStyle(fontSize: 12)),
-          ),
-          IconButton(
-            icon: const Icon(Icons.close_rounded, size: 16),
-            onPressed: () => setState(() => _showSearch = false),
           ),
         ],
       ),
@@ -2210,8 +2967,8 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
               decoration: BoxDecoration(
                 color: AppColors.accent.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(4),
-                border: Border.all(
-                    color: AppColors.accent.withValues(alpha: 0.3)),
+                border:
+                    Border.all(color: AppColors.accent.withValues(alpha: 0.3)),
               ),
               child: Text(comp,
                   style: TextStyle(
@@ -2249,14 +3006,16 @@ class _UnifiedEditorState extends State<UnifiedEditorScreen>
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _ModeBadge extends StatelessWidget {
-  final _UTab tab;
+  final EditorTab tab;
   const _ModeBadge({required this.tab});
 
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (tab.viewMode) {
-      EditorViewMode.code =>
-        (tab.lang?.label ?? 'Code', tab.lang?.color ?? AppColors.colorCode),
+      EditorViewMode.code => (
+          tab.lang?.label ?? 'Code',
+          tab.lang?.color ?? AppColors.colorCode
+        ),
       EditorViewMode.markdown => ('MD', const Color(0xFF4078C8)),
       EditorViewMode.text => ('TXT', AppColors.colorText),
       EditorViewMode.richText => ('DOC', const Color(0xFF2B579A)),
@@ -2288,7 +3047,8 @@ class _FmtBtn extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(4),
-        child: Padding(padding: const EdgeInsets.all(7), child: Icon(icon, size: 16)),
+        child: Padding(
+            padding: const EdgeInsets.all(7), child: Icon(icon, size: 16)),
       ),
     );
   }
@@ -2299,4 +3059,25 @@ class _UpperCaseFmt extends TextInputFormatter {
   TextEditingValue formatEditUpdate(
           TextEditingValue old, TextEditingValue value) =>
       value.copyWith(text: value.text.toUpperCase());
+}
+
+/// Position et taille du document actif, affichées par la barre d'état.
+class _DocStats {
+  final EditorCursor cursor;
+  final int lineCount;
+  final int charCount;
+
+  const _DocStats(this.cursor, this.lineCount, this.charCount);
+
+  static const empty = _DocStats(EditorCursor.start, 1, 0);
+
+  @override
+  bool operator ==(Object other) =>
+      other is _DocStats &&
+      other.cursor == cursor &&
+      other.lineCount == lineCount &&
+      other.charCount == charCount;
+
+  @override
+  int get hashCode => Object.hash(cursor, lineCount, charCount);
 }

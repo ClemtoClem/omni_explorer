@@ -1,6 +1,8 @@
 /// Outils communs aux tests de widget de l'éditeur unifié, qui lit et écrit
 /// de vrais fichiers.
 
+import 'dart:io';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:omni_explorer/core/services/settings_service.dart';
 import 'package:omni_explorer/features/text_editor/screens/unified_editor_screen.dart';
+import 'package:omni_explorer/features/text_editor/services/editor_drafts.dart';
 
 /// Prépare un test : pas de téléchargement de polices, préférences simulées.
 void setUpEditorTest() {
@@ -17,6 +20,10 @@ void setUpEditorTest() {
   SharedPreferences.setMockInitialValues({});
   // Pas de trousseau système en test : stockage sécurisé simulé.
   FlutterSecureStorage.setMockInitialValues({});
+  // Brouillons dans un dossier jetable (pas de path_provider en test).
+  final drafts = Directory.systemTemp.createTempSync('editor_drafts_');
+  EditorDrafts.directory = () async => drafts;
+  addTearDown(() => drafts.delete(recursive: true));
 }
 
 /// Laisse aboutir les entrées/sorties réelles déclenchées depuis la zone de

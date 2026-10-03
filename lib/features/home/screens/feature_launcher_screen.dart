@@ -127,29 +127,6 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
       case AppFeature.fileExplorer:
         screen = const StorageScreen();
         break;
-      /*case AppFeature.images:
-        // Inclut les dossiers pour pouvoir naviguer + filtre images.
-        screen = const FileExplorerScreen(
-          initialCategories: {FileCategory.folder, FileCategory.image},
-        );
-        break;
-      case AppFeature.pdfViewer:
-        screen = const FileExplorerScreen(
-          initialCategories: {FileCategory.folder, FileCategory.pdf},
-        );
-        break;
-      case AppFeature.mediaPlayer:
-        final hasMedia = context.read<MediaPlayerProvider>().hasMedia;
-        screen = hasMedia
-            ? const MediaPlayerScreen()
-            : const FileExplorerScreen(
-                initialCategories: {
-                  FileCategory.folder,
-                  FileCategory.audio,
-                  FileCategory.video,
-                },
-              );
-        break;*/
       case AppFeature.textEditor:
         // Si aucun onglet n'est en mémoire, rouvre la dernière liste persistée.
         final editorProv = context.read<UnifiedEditorProvider>();
@@ -206,18 +183,6 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
                         style: theme.textTheme.headlineSmall
                             ?.copyWith(fontWeight: FontWeight.bold)),
                   ),
-                  actions: [
-                    /*IconButton(
-                      icon: const Icon(Icons.history_rounded),
-                      tooltip: 'Récents',
-                      onPressed: () => _open(AppFeature.recents),
-                    ),*/
-                    IconButton(
-                      icon: const Icon(Icons.settings_rounded),
-                      tooltip: 'Paramètres',
-                      onPressed: () => _open(AppFeature.settings),
-                    ),
-                  ],
                 ),
                 SliverPadding(
                   padding: const EdgeInsets.all(16),
@@ -248,32 +213,6 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
         subtitle: 'Parcourir vos fichiers et dossiers',
         onTap: () => _open(AppFeature.fileExplorer),
       ),
-      /*FeatureCard(
-        icon: Icons.image_rounded,
-        color: AppColors.colorImage,
-        title: 'Images',
-        subtitle: 'Photos, illustrations, GIF',
-        onTap: () => _open(AppFeature.images),
-      ),*/
-      /*FeatureCard(
-        icon: Icons.play_circle_rounded,
-        color: AppColors.colorAudio,
-        title: 'Lecteur multimédia',
-        subtitle: media.hasMedia
-            ? 'En cours : ${media.currentPath?.split("/").last ?? "média"}'
-            : 'Musique et vidéos',
-        badge: media.hasMedia
-            ? (media.isPlaying ? '▶︎' : '⏸')
-            : null,
-        onTap: () => _open(AppFeature.mediaPlayer),
-      ),
-      FeatureCard(
-        icon: Icons.picture_as_pdf_rounded,
-        color: AppColors.colorPdf,
-        title: 'PDF',
-        subtitle: 'Lecteur de documents',
-        onTap: () => _open(AppFeature.pdfViewer),
-      ),*/
       FeatureCard(
         icon: Icons.code_rounded,
         color: AppColors.colorCode,

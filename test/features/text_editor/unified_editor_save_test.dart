@@ -29,6 +29,8 @@ void main() {
     tab.isReadOnly = false;
     tab.textCtrl.text = text;
     tab.isDirty = true;
+    // Comme une saisie : l'écran se reconstruit et active « Sauvegarder ».
+    editor.setActiveTabIndex(editor.activeTabIndex);
     await tester.pump();
     await tester.tap(find.byIcon(Icons.save_rounded));
     await tester.pump();
@@ -62,7 +64,6 @@ void main() {
   }, skip: Platform.isWindows);
 
   testWidgets('un fichier exécutable garde ses permissions', (tester) async {
-    // Fichier texte (le mode code est évité ici : voir P1.2 dans le README).
     final f = File(p.join(sandbox.path, 'run.txt'))
       ..writeAsStringSync('ancien');
     await tester.runAsync(() => Process.run('chmod', ['755', f.path]));
