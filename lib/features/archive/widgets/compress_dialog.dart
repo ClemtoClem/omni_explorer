@@ -52,6 +52,7 @@ class _CompressDialogState extends State<_CompressDialog> {
   final _pwCtrl = TextEditingController();
   ArchiveType _type = ArchiveType.zip;
   bool _withPassword = false;
+  bool _encryptNames = false;
   bool _busy = false;
   String? _error;
 
@@ -94,7 +95,10 @@ class _CompressDialogState extends State<_CompressDialog> {
     try {
       await ArchiveService.createArchive(
           p.join(widget.destDir, _fileName), widget.sourcePaths, _type,
-          password: password);
+          password: password,
+          encryptNames: password != null &&
+              _type == ArchiveType.sevenZip &&
+              _encryptNames);
       if (mounted) Navigator.pop(context, true);
     } on ArchiveOpException catch (e) {
       setState(() {
@@ -151,9 +155,7 @@ class _CompressDialogState extends State<_CompressDialog> {
                     CheckboxListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
-                      title: Text(_type == ArchiveType.zip
-                          ? 'Protéger par mot de passe (AES)'
-                          : 'Protéger par mot de passe'),
+                      title: const Text('Protéger par mot de passe (AES)'),
                       value: _withPassword,
                       onChanged: (v) =>
                           setState(() => _withPassword = v ?? false),
@@ -164,6 +166,16 @@ class _CompressDialogState extends State<_CompressDialog> {
                         obscureText: true,
                         decoration:
                             const InputDecoration(labelText: 'Mot de passe'),
+                      ),
+                    if (_withPassword && _type == ArchiveType.sevenZip)
+                      CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Chiffrer aussi les noms des '
+                            'fichiers'),
+                        value: _encryptNames,
+                        onChanged: (v) =>
+                            setState(() => _encryptNames = v ?? false),
                       ),
                   ],
                   if (_error != null) ...[

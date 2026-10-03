@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 
 import 'package:omni_explorer/features/archive/screens/archive_screen.dart';
 import 'package:omni_explorer/features/archive/services/archive_document.dart';
+import 'package:omni_explorer/features/archive/services/seven_zip/seven_zip_writer.dart';
 
 import '../../helpers/editor_harness.dart' show settleIo, setUpEditorTest;
 
@@ -136,5 +137,37 @@ void main() {
     await tester.tap(text('Ouvrir'));
     await settleIo(tester, until: () => shown('e.txt'));
     expect(text('a'), findsOneWidget);
+  });
+
+  testWidgets('7z aux noms chiffrés : mot de passe, puis modification',
+      (tester) async {
+    final a = arc.Archive()
+      ..addFile(arc.ArchiveFile.string('a/d.txt', 'd'))
+      ..addFile(arc.ArchiveFile.string('e.txt', 'e'));
+    final path = p.join(sandbox.path, 'secret.7z');
+    File(path).writeAsBytesSync(
+        SevenZipWriter.encode(a, password: 'secret', encryptHeader: true));
+    await open(tester, path,
+        waitFor: 'Cette archive est protégée par un mot de passe.');
+
+    await tester.enterText(find.byKey(const Key('archive-password')), 'faux');
+    await tester.tap(text('Ouvrir'));
+    await settleIo(tester, until: () => shown('Mot de passe incorrect.'));
+
+    await tester.enterText(find.byKey(const Key('archive-password')), 'secret');
+    await tester.tap(text('Ouvrir'));
+    await settleIo(tester, until: () => shown('e.txt'));
+    expect(find.textContaining('Lecture seule'), findsNothing);
+
+    await tester.longPress(text('e.txt'));
+    await tester.pumpAndSettle();
+    await tester.tap(text('Dupliquer'));
+    await settleIo(tester, until: () => shown('e.copy.1.txt') && idle());
+
+    late ArchiveDocument doc;
+    await tester.runAsync(
+        () async => doc = await ArchiveDocument.open(path, password: 'secret'));
+    expect(doc.encryptNames, isTrue);
+    expect(String.fromCharCodes(doc.readFile('e.copy.1.txt')), 'e');
   });
 }

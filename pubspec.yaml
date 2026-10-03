@@ -80,6 +80,8 @@ dependencies:
   # ── Utilities ───────────────────────────────────────────────────────────────
   uuid: ^4.4.2
   archive: ^4.0.7
+  # Chiffrement AES et SHA-256 des archives 7z (Dart pur).
+  pointycastle: ^4.0.0
   open_filex: ^4.4.0
   # share_plus >=10.1.0 utilise web ^1.0.0, compatible avec pdfx >=2.9.0
   # share_plus 10.x garde l'ancienne API Share.share() — pas de breaking change

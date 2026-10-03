@@ -1718,3 +1718,84 @@ création.
     dossier qui irait dans lui-même.
 - `flutter test` : 414 tests réussis. `flutter analyze` : aucune nouvelle
   remarque.
+
+### Archives 7z intégrées : lecture, extraction, création, modification
+
+**Problème**
+- Le 7z passait entièrement par l'outil `7z`. Il était donc indisponible
+  sous Android et sous Linux sans p7zip, et une archive 7z n'était jamais
+  modifiable.
+- Le paquet `archive` sait décoder LZMA, mais il n'a ni lecteur 7z ni
+  encodeur LZMA : son encodeur XZ ne fait que stocker les données.
+
+**Modifications** (`lib/features/archive/services/seven_zip/`, Dart pur,
+donc identique sous Android et Linux, compatible F-Droid)
+- `lzma_encoder.dart` : encodeur LZMA (flux brut) écrit d'après le format de
+  référence du LZMA SDK :
+  - chaînes de hachage sur 3 octets, analyse gloutonne avec évaluation
+    paresseuse, réutilisation des quatre dernières distances ;
+  - mesuré sur les sources de `lib/` (1,6 Mo) : 307 Ko, contre 314 Ko pour
+    `7z -mx=1` et 301 Ko pour `-mx=3`.
+- `seven_zip_reader.dart` : lecture d'après `7zFormat.txt` :
+  - en-têtes compressés ou chiffrés, archives solides ou non ;
+  - méthodes Copy, LZMA, LZMA2, Deflate, BZip2, filtres BCJ x86 (porté de
+    `Bra86.c`) et Delta, chiffrement 7zAES ;
+  - CRC vérifiés ; mot de passe absent ou faux signalé comme tel ;
+  - liens symboliques reconnus (mode Unix), donc jamais recréés.
+- `seven_zip_writer.dart` : écriture d'un bloc solide LZMA :
+  - dates et modes Unix conservés comme le fait p7zip ;
+  - avec un mot de passe, AES-256 (clé SHA-256 itérée 2^19 fois, comme
+    7-Zip) ;
+  - en option, chiffrement de l'en-tête, donc des noms de fichiers
+    (équivalent de `7z -mhe=on`).
+- `seven_zip_aes.dart` : AES-256-CBC et dérivation de clé, via
+  `pointycastle`, désormais en dépendance directe (Dart pur, il était déjà
+  présent en dépendance indirecte).
+- **Intégration** : le 7z se convertit vers et depuis l'objet `Archive` du
+  paquet `archive`. L'extraction commune s'applique donc telle quelle : noms
+  validés en bloc (« Zip Slip »), liens jamais recréés, conflits arbitrés,
+  écriture atomique.
+  - `ArchiveService` : lister, extraire tout ou une entrée, et créer en 7z
+    sur toutes les plateformes, avec mot de passe et « Chiffrer aussi les
+    noms des fichiers ». Au-delà de 2 Mio, le travail se fait dans un
+    isolat (l'interface reste fluide).
+  - `ArchiveDocument` : le 7z devient modifiable (ajouter, renommer,
+    déplacer, supprimer, mot de passe). Une archive aux noms chiffrés le
+    reste à l'enregistrement.
+  - Écran d'archive : menu « Mot de passe… » pour le 7z, avec l'option de
+    chiffrement des noms. Dialogue de création : 7z proposé partout.
+  - **Secours** : une méthode non gérée (PPMd, BCJ2, filtres ARM…) laisse
+    la liste consultable. L'extraction passe alors par `7z` s'il est
+    installé (Linux) ; sinon, un message nomme la méthode. Une telle archive
+    n'est pas réécrite.
+
+| Format | Lire / extraire | Créer | Modifier |
+|---|---|---|---|
+| 7z (Copy, LZMA, LZMA2, Deflate, BZip2, BCJ, Delta, AES) | oui, partout | oui, partout (LZMA, AES en option) | oui |
+| 7z (PPMd, BCJ2, ARM…) | liste ; extraction via `7z` sous Linux | — | non |
+
+**Validation**
+- 13 archives de test produites par 7-Zip (`test/fixtures/seven_zip/`, une
+  par méthode ou option) : toutes lues, CRC compris, ainsi que l'en-tête
+  chiffré, le lien symbolique et le refus motivé de PPMd.
+- Archives écrites par l'application et vérifiées par 7-Zip lui-même
+  (`7z t`, `7z x`) : sans mot de passe, avec, et avec en-tête chiffré.
+- Encodeur LZMA : allers-retours (vide, aléatoire, répétitif…) et flux
+  décodé par liblzma (Python).
+- Service et document : création depuis le disque, liste, extraction
+  complète ou partielle, conflits, entrée dangereuse refusée en bloc, lien
+  non recréé, gros contenu traité dans un isolat. Les tests de modification
+  existants tournent aussi en 7z. Mot de passe et noms chiffrés conservés.
+- Écran : 7z aux noms chiffrés ouvert avec mot de passe, puis modifié.
+- `flutter test` : 456 tests réussis. `flutter build apk --release` :
+  réussi. `flutter analyze` : aucune nouvelle remarque.
+
+**Limites**
+- Comme pour les autres formats, l'archive est traitée en mémoire. Les
+  très grosses archives (plusieurs centaines de Mo) sont à éviter sur
+  téléphone.
+- Écriture en LZMA seulement : le taux de compression est celui de
+  `7z -mx=1` à `-mx=3`, pas celui de `-mx=9`.
+- Pas de décodage PPMd, BCJ2 ni des filtres ARM et ARM64 intégré (rares,
+  mais les filtres ARM apparaissent dans les archives d'exécutables
+  Android).

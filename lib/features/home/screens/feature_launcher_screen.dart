@@ -7,19 +7,15 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../../app/constants/app_constants.dart';
 import '../../../app/theme/app_theme.dart';
 import '../../../core/services/app_state_service.dart';
 import '../../../core/services/permissions_service.dart';
-import '../../file_explorer/screens/file_explorer_screen.dart';
 import '../../media_player/providers/media_player_provider.dart';
-import '../../media_player/screens/media_player_screen.dart';
 import '../../password_vault/screens/password_vault_home_screen.dart';
 import '../../settings/screens/settings_screen.dart';
 import '../../text_editor/screens/unified_editor_screen.dart';
 import '../../video_editor/screens/video_editor_home_screen.dart';
 import '../widgets/feature_card.dart';
-import 'recent_files_screen.dart';
 import '../../file_explorer/screens/storage_screen.dart';
 
 class FeatureLauncherScreen extends StatefulWidget {
@@ -143,9 +139,6 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
       case AppFeature.settings:
         screen = const SettingsScreen();
         break;
-      /*case AppFeature.recents:
-        screen = const RecentFilesScreen();
-        break;*/
     }
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => screen!));
   }
@@ -163,17 +156,13 @@ class _FeatureLauncherScreenState extends State<FeatureLauncherScreen>
       body: SafeArea(
         child: LayoutBuilder(
           builder: (ctx, c) {
-            final crossAxis = c.maxWidth >= 1100
-                ? 4
-                : c.maxWidth >= 720
-                    ? 3
-                    : 2;
+            final crossAxis = (c.maxWidth >= 1100 ? 4 : (c.maxWidth >= 720 ? 3 : 2));
             return CustomScrollView(
               physics: const BouncingScrollPhysics(),
               slivers: [
                 SliverAppBar(
                   pinned: true,
-                  expandedHeight: 120,
+                  expandedHeight: 50,
                   backgroundColor: theme.scaffoldBackgroundColor,
                   elevation: 0,
                   automaticallyImplyLeading: false,

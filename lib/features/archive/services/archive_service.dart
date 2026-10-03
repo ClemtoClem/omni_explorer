@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:archive/archive.dart' as arc;
 import 'package:path/path.dart' as p;
@@ -7,6 +8,8 @@ import '../../../core/utils/atomic_write.dart';
 import '../../../core/utils/safe_path.dart';
 import '../models/archive_entry.dart';
 import '../models/archive_tree.dart';
+import 'seven_zip/seven_zip_reader.dart';
+import 'seven_zip/seven_zip_writer.dart';
 
 typedef _ByteDecoder = List<int> Function(List<int>);
 
@@ -14,7 +17,9 @@ typedef _ByteDecoder = List<int> Function(List<int>);
 ///
 /// - ZIP / JAR / WAR / APK    → package Dart `archive`
 /// - TAR / TAR.GZ / BZ2 / XZ  → package Dart `archive`
-/// - 7Z                        → CLI `7z` / `7za`
+/// - 7Z                        → lecteur / écrivain intégrés (Dart pur) ;
+///                               CLI `7z` en secours pour les méthodes
+///                               rares (PPMd, BCJ2…), sous Linux
 /// - RAR                       → CLI `unrar` / `rar`
 class ArchiveService {
   ArchiveService._();
@@ -260,16 +265,39 @@ class ArchiveService {
 
   // ── Listing via CLI ───────────────────────────────────────────────────────
 
+  /// 7z : en-tête lu par le lecteur intégré (rien n'est décompressé, sauf
+  /// un en-tête compressé) ; l'outil `7z` en secours.
   static Future<List<ArchiveEntryInfo>> _list7z(
     String path, {
     String? password,
   }) async {
-    final cmd = await find7z();
-    if (cmd == null) {
-      throw const ArchiveOpException(
-        'p7zip n\'est pas installé.\nInstallez-le avec : sudo apt install p7zip-full',
-      );
+    final bytes = await File(path).readAsBytes();
+    try {
+      final archive =
+          _sevenZipGuard(() => SevenZipArchive.open(bytes, password: password));
+      return [
+        for (final e in archive.entries)
+          ArchiveEntryInfo(
+            name: p.basename(e.name),
+            fullPath: e.name,
+            size: e.size,
+            compressedSize: 0,
+            modified: e.modified,
+            isDirectory: e.isDirectory,
+          ),
+      ];
+    } on SevenZipUnsupportedException catch (e) {
+      if (await find7z() == null) throw _unsupported7z(e);
+      return _list7zCli(path, password: password);
     }
+  }
+
+  static Future<List<ArchiveEntryInfo>> _list7zCli(
+    String path, {
+    String? password,
+  }) async {
+    final cmd = await find7z();
+    if (cmd == null) throw const ArchiveOpException('p7zip non installé.');
     final args = ['l', '-slt', if (password != null) '-p$password', '--', path];
     final r = await Process.run(cmd, args);
     if (r.exitCode == 2) {
@@ -283,6 +311,30 @@ class ArchiveService {
     }
     return _parse7zList(r.stdout as String);
   }
+
+  /// Exécute [body] (lecteur 7z) en traduisant ses erreurs pour
+  /// l'utilisateur ; [SevenZipUnsupportedException] passe, pour le secours.
+  static T _sevenZipGuard<T>(T Function() body) {
+    try {
+      return body();
+    } on SevenZipPasswordException catch (e) {
+      throw ArchiveOpException(e.toString(), isPasswordRequired: true);
+    } on FormatException catch (e) {
+      throw ArchiveOpException('Archive 7z illisible : ${e.message}');
+    }
+  }
+
+  static ArchiveOpException _unsupported7z(SevenZipUnsupportedException e) =>
+      ArchiveOpException('7z : la méthode « ${e.method} » n\'est pas prise '
+          'en charge par l\'application'
+          '${Platform.isAndroid ? '.' : ' (installez p7zip pour l\'extraire).'}');
+
+  /// Au-delà de cette taille, compression et décompression 7z partent dans
+  /// un isolat : l'interface reste fluide.
+  static const int _isolateThreshold = 2 << 20;
+
+  static Future<T> _heavy<T>(int size, T Function() work) =>
+      size > _isolateThreshold ? Isolate.run(work) : Future.sync(work);
 
   static Future<List<ArchiveEntryInfo>> _listRar(
     String path, {
@@ -330,7 +382,8 @@ class ArchiveService {
     final type = detectType(archivePath);
     switch (type) {
       case ArchiveType.sevenZip:
-        return _extract7z(archivePath, destDir, password: password);
+        return _extract7z(archivePath, destDir,
+            password: password, onProgress: onProgress, onConflict: onConflict);
       case ArchiveType.rar:
         return _extractRar(archivePath, destDir, password: password);
       case ArchiveType.unknown:
@@ -496,19 +549,48 @@ class ArchiveService {
         root, p.basenameWithoutExtension(path), decoded, onConflict);
   }
 
-  // Pour 7z/RAR, l'extraction est faite par l'outil externe : on liste
-  // d'abord les entrées et on refuse l'archive si un nom est dangereux.
-  // Limite : les liens symboliques contenus dans ces archives ne sont pas
-  // détectés par la liste (on s'appuie sur les protections de 7-Zip/unrar).
+  // Pour RAR (et 7z en secours), l'extraction est faite par l'outil externe :
+  // on liste d'abord les entrées et on refuse l'archive si un nom est
+  // dangereux. Limite : les liens symboliques contenus dans ces archives ne
+  // sont pas détectés par la liste (on s'appuie sur les protections de
+  // 7-Zip/unrar).
 
+  /// 7z : décompression intégrée, puis écriture commune (noms validés,
+  /// liens symboliques jamais recréés, conflits arbitrés). [where] limite
+  /// l'extraction à certaines entrées. Méthode non gérée : outil `7z` (toute
+  /// l'archive, renommage automatique des fichiers existants).
   static Future<ExtractResult> _extract7z(
+    String path,
+    String dest, {
+    String? password,
+    void Function(double)? onProgress,
+    ConflictResolver? onConflict,
+    bool Function(String name)? where,
+  }) async {
+    final bytes = await File(path).readAsBytes();
+    final arc.Archive archive;
+    try {
+      archive = await _heavy(
+          bytes.length,
+          () => _sevenZipGuard(() =>
+              SevenZipArchive.open(bytes, password: password).toArchive(
+                  where: where == null ? null : (e) => where(e.name))));
+    } on SevenZipUnsupportedException catch (e) {
+      if (where != null || await find7z() == null) throw _unsupported7z(e);
+      return _extract7zCli(path, dest, password: password);
+    }
+    return _writeArchive(archive.files, dest, onProgress,
+        onConflict: onConflict);
+  }
+
+  static Future<ExtractResult> _extract7zCli(
     String path,
     String dest, {
     String? password,
   }) async {
     final cmd = await find7z();
     if (cmd == null) throw const ArchiveOpException('p7zip non installé.');
-    final entries = await _list7z(path, password: password);
+    final entries = await _list7zCli(path, password: password);
     _validateNames(dest, entries.map((e) => e.fullPath));
     await Directory(dest).create(recursive: true);
     // -aou : renomme automatiquement les fichiers déjà présents (au lieu de
@@ -564,7 +646,16 @@ class ArchiveService {
     ConflictResolver? onConflict,
   }) async {
     final type = detectType(archivePath);
+    final wanted = ArchiveTree.normalize(entryPath);
+    bool selected(String name) {
+      final norm = ArchiveTree.normalize(name);
+      return norm == wanted || norm.startsWith('$wanted/');
+    }
+
     switch (type) {
+      case ArchiveType.sevenZip:
+        return _extract7z(archivePath, destDir,
+            password: password, onConflict: onConflict, where: selected);
       case ArchiveType.zip:
       case ArchiveType.jar:
       case ArchiveType.tar:
@@ -585,27 +676,22 @@ class ArchiveService {
     // Comparaison sur les chemins normalisés (« ./src/a.txt » = « src/a.txt »),
     // comme dans l'arborescence affichée ; l'entrée elle-même ou ses
     // descendants, pas un simple préfixe de caractères (« doc » ≠ « docs/… »).
-    final wanted = ArchiveTree.normalize(entryPath);
-    final selected = archive.files.where((f) {
-      final norm = ArchiveTree.normalize(f.name);
-      return norm == wanted || norm.startsWith('$wanted/');
-    }).toList();
-    return _writeArchive(selected, destDir, null, onConflict: onConflict);
+    final files = archive.files.where((f) => selected(f.name)).toList();
+    return _writeArchive(files, destDir, null, onConflict: onConflict);
   }
 
   // ── Création d'archive ────────────────────────────────────────────────────
 
-  /// Formats de création proposés sur cette plateforme. GZ et BZ2 ne
-  /// compressent qu'un fichier unique ; 7z passe par l'outil externe
-  /// (Linux, s'il est installé).
+  /// Formats de création proposés. GZ et BZ2 ne compressent qu'un fichier
+  /// unique.
   static Future<List<ArchiveType>> creatableTypes() async => [
         ArchiveType.zip,
+        ArchiveType.sevenZip,
         ArchiveType.tar,
         ArchiveType.tarGz,
         ArchiveType.tarBz2,
         ArchiveType.gz,
         ArchiveType.bz2,
-        if (!Platform.isAndroid && await find7z() != null) ArchiveType.sevenZip,
       ];
 
   /// Extension de fichier conventionnelle de [type].
@@ -626,17 +712,32 @@ class ArchiveService {
   /// Crée l'archive [destPath] au format [type] à partir de [sourcePaths]
   /// (fichiers et dossiers, récursivement ; les liens symboliques ne sont
   /// pas suivis). Refuse d'écraser une archive existante. [password] :
-  /// ZIP chiffré en AES (natif, toutes plateformes) ou 7z.
+  /// ZIP ou 7z chiffré en AES (natif, toutes plateformes) ; avec
+  /// [encryptNames], un 7z chiffre aussi la liste des fichiers.
   static Future<void> createArchive(
     String destPath,
     List<String> sourcePaths,
     ArchiveType type, {
     String? password,
+    bool encryptNames = false,
     void Function(double)? onProgress,
   }) async {
     _ensureNewArchive(destPath);
     if (type == ArchiveType.sevenZip) {
-      return create7z(destPath, sourcePaths, password: password);
+      final archive = arc.Archive();
+      for (var i = 0; i < sourcePaths.length; i++) {
+        await _addToArchive(
+            archive, sourcePaths[i], p.basename(sourcePaths[i]));
+        onProgress?.call((i + 1) / sourcePaths.length * 0.5);
+      }
+      final total = archive.files.fold<int>(0, (n, f) => n + f.size);
+      final bytes = await _heavy(
+          total,
+          () => SevenZipWriter.encode(archive,
+              password: password, encryptHeader: encryptNames));
+      await AtomicWrite.bytes(destPath, bytes);
+      onProgress?.call(1);
+      return;
     }
     if (password != null &&
         !(type == ArchiveType.zip || type == ArchiveType.jar)) {
@@ -697,25 +798,18 @@ class ArchiveService {
       createArchive(destPath, sourcePaths, ArchiveType.tarGz,
           onProgress: onProgress);
 
+  /// 7z (chiffré en AES si [password]).
   static Future<void> create7z(
     String destPath,
     List<String> sourcePaths, {
     String? password,
-  }) async {
-    _ensureNewArchive(destPath);
-    final cmd = await find7z();
-    if (cmd == null) throw const ArchiveOpException('p7zip non installé.');
-    // « 7z a » sur une archive existante y AJOUTERAIT les fichiers : on crée
-    // toujours une archive neuve sous un nom temporaire.
-    await _produceThenRename(
-        destPath,
-        (tmp) => _run7z(cmd, [
-              'a',
-              if (password != null) '-p$password',
-              tmp,
-              ...sourcePaths,
-            ]));
-  }
+    bool encryptNames = false,
+    void Function(double)? onProgress,
+  }) =>
+      createArchive(destPath, sourcePaths, ArchiveType.sevenZip,
+          password: password,
+          encryptNames: encryptNames,
+          onProgress: onProgress);
 
   /// Refuse d'écraser (ou de compléter) une archive existante.
   static void _ensureNewArchive(String destPath) {
@@ -724,42 +818,6 @@ class ArchiveService {
       throw ArchiveOpException(
           '« ${p.basename(destPath)} » existe déjà : choisissez un autre nom.');
     }
-  }
-
-  /// Chemin temporaire caché, libre, à côté de [target] ; l'extension est
-  /// conservée (7z en déduit le format).
-  static String _tempSibling(String target) {
-    final ext = p.extension(target);
-    final base = p.basenameWithoutExtension(target);
-    final stamp = DateTime.now().microsecondsSinceEpoch;
-    for (var i = 0;; i++) {
-      final tmp = p.join(p.dirname(target), '.$base.tmp-$stamp-$i$ext');
-      if (FileSystemEntity.typeSync(tmp, followLinks: false) ==
-          FileSystemEntityType.notFound) {
-        return tmp;
-      }
-    }
-  }
-
-  /// Fait produire le fichier par [produce] sous un nom temporaire, puis le
-  /// met en place par renommage : [target] n'est jamais laissé incomplet, et
-  /// est remplacé d'un coup s'il existait (l'original reste intact jusque-là).
-  static Future<void> _produceThenRename(
-    String target,
-    Future<void> Function(String tmp) produce,
-  ) async {
-    final tmp = _tempSibling(target);
-    try {
-      await produce(tmp);
-      await File(tmp).rename(AtomicWrite.resolveTarget(target));
-    } finally {
-      if (File(tmp).existsSync()) await File(tmp).delete();
-    }
-  }
-
-  static Future<void> _run7z(String cmd, List<String> args) async {
-    final r = await Process.run(cmd, args);
-    if (r.exitCode != 0) throw ArchiveOpException('Erreur 7z : ${r.stderr}');
   }
 
   // Modification d'archive : voir ArchiveDocument (ajout, renommage,

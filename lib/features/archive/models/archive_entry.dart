@@ -48,18 +48,19 @@ extension ArchiveTypeExt on ArchiveType {
     }
   }
 
-  /// Pris en charge nativement par le package Dart `archive`.
-  bool get isDartNative =>
-      this != ArchiveType.sevenZip && this != ArchiveType.rar;
+  /// Lu dans l'application (paquet `archive`, ou lecteur 7z intégré) ; RAR
+  /// passe par l'outil externe.
+  bool get isDartNative => this != ArchiveType.rar;
 
   /// Modifiable dans l'application (ajouter, renommer, déplacer…) : le
-  /// format peut être réécrit fidèlement par le paquet `archive`.
+  /// format peut être réécrit fidèlement (paquet `archive`, écrivain 7z).
   bool get canEdit => switch (this) {
         ArchiveType.zip ||
         ArchiveType.jar ||
         ArchiveType.tar ||
         ArchiveType.tarGz ||
-        ArchiveType.tarBz2 =>
+        ArchiveType.tarBz2 ||
+        ArchiveType.sevenZip =>
           true,
         _ => false,
       };
@@ -74,9 +75,8 @@ extension ArchiveTypeExt on ArchiveType {
         ArchiveType.gz ||
         ArchiveType.bz2 =>
           'Fichier compressé unique : rien à organiser à l\'intérieur.',
-        ArchiveType.sevenZip ||
         ArchiveType.rar =>
-          '$label : lecture et extraction uniquement (outil externe, sous '
+          'RAR : lecture et extraction uniquement (outil externe, sous '
               'Linux).',
         _ => 'Format non reconnu.',
       };
@@ -87,8 +87,8 @@ extension ArchiveTypeExt on ArchiveType {
       this == ArchiveType.bz2 ||
       this == ArchiveType.xz;
 
-  /// Prend en charge un mot de passe : ZIP (AES, natif sur toutes les
-  /// plateformes), 7z et RAR (outil externe, lecture).
+  /// Prend en charge un mot de passe : ZIP et 7z (AES, natif sur toutes
+  /// les plateformes), RAR (outil externe, lecture).
   bool get supportsPassword =>
       this == ArchiveType.zip ||
       this == ArchiveType.sevenZip ||

@@ -8,6 +8,8 @@ import 'package:omni_explorer/core/services/file_operations_service.dart';
 import 'package:omni_explorer/features/archive/models/archive_entry.dart';
 import 'package:omni_explorer/features/archive/models/archive_tree.dart';
 import 'package:omni_explorer/features/archive/services/archive_document.dart';
+import 'package:omni_explorer/features/archive/services/seven_zip/seven_zip_reader.dart';
+import 'package:omni_explorer/features/archive/services/seven_zip/seven_zip_writer.dart';
 
 void main() {
   late Directory sandbox;
@@ -36,6 +38,7 @@ void main() {
     final tar = arc.TarEncoder().encodeBytes(a);
     final bytes = switch (p.extension(fileName)) {
       '.zip' => arc.ZipEncoder().encodeBytes(a),
+      '.7z' => SevenZipWriter.encode(a),
       '.tar' => tar,
       '.gz' => const arc.GZipEncoder().encodeBytes(tar),
       _ => arc.BZip2Encoder().encodeBytes(tar),
@@ -54,7 +57,8 @@ void main() {
     'projet.zip',
     'projet.tar',
     'projet.tar.gz',
-    'projet.tar.bz2'
+    'projet.tar.bz2',
+    'projet.7z',
   ]) {
     group(fileName, () {
       test('ajouter, créer, renommer, déplacer, dupliquer, supprimer',
@@ -192,6 +196,50 @@ void main() {
 
     doc = await ArchiveDocument.open(doc.path, password: 'mot de passe');
     expect(String.fromCharCodes(doc.readFile('README.md')), 'lisez-moi');
+  });
+
+  test('7z chiffré : mot de passe exigé, noms chiffrés conservés', () async {
+    var doc = await ArchiveDocument.open(makeArchive('secret.7z'));
+    expect(doc.canEdit, isTrue);
+    doc.setPassword('mot de passe', encryptNames: true);
+    await doc.save();
+
+    await expectLater(
+        ArchiveDocument.open(doc.path),
+        throwsA(isA<ArchiveOpException>()
+            .having((e) => e.isPasswordRequired, 'mot de passe requis', true)));
+    await expectLater(ArchiveDocument.open(doc.path, password: 'faux'),
+        throwsA(isA<ArchiveOpException>()));
+
+    doc = await ArchiveDocument.open(doc.path, password: 'mot de passe');
+    expect(doc.encryptNames, isTrue);
+    expect(String.fromCharCodes(doc.readFile('README.md')), 'lisez-moi');
+
+    // Une modification réécrit l'archive avec le même chiffrement.
+    doc.createFolder('', 'neuf');
+    await doc.save();
+    final raw = File(doc.path).readAsBytesSync();
+    expect(SevenZipArchive.open(raw, password: 'mot de passe').headerEncrypted,
+        isTrue);
+
+    // Retirer le mot de passe : archive lisible par tous.
+    doc = await ArchiveDocument.open(doc.path, password: 'mot de passe');
+    doc.setPassword(null);
+    await doc.save();
+    doc = await ArchiveDocument.open(doc.path);
+    expect(doc.password, isNull);
+    expect(doc.exists('neuf'), isTrue);
+  });
+
+  test('7z avec une méthode non gérée : consultable, pas réécrit', () async {
+    final path = p.join(sandbox.path, 'ppmd.7z');
+    File('test/fixtures/seven_zip/ppmd.7z').copySync(path);
+    final doc = await ArchiveDocument.open(path);
+    expect(names(doc.tree, ''), ['sub/', 'vide/', 'a.txt']);
+    doc.createFolder('', 'x');
+    await expectLater(doc.save(), throwsA(isA<ArchiveOpException>()));
+    expect(File(path).readAsBytesSync(),
+        File('test/fixtures/seven_zip/ppmd.7z').readAsBytesSync());
   });
 
   test('formats en lecture seule : modification refusée', () async {

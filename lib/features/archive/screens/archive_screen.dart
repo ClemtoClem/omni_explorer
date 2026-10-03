@@ -264,42 +264,55 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
 
   Future<void> _managePassword() async {
     final ctrl = TextEditingController();
-    final action = await showDialog<String>(
+    final is7z = _type == ArchiveType.sevenZip;
+    var encryptNames = _doc?.encryptNames ?? false;
+    final action = await showDialog<(String, bool)>(
       context: context,
-      builder: (dCtx) => AlertDialog(
-        title: const Text('Mot de passe de l\'archive'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(_doc?.password == null
-                ? 'L\'archive n\'est pas chiffrée. Un mot de passe la chiffrera '
-                    'en AES.'
-                : 'L\'archive est chiffrée. Laissez vide pour retirer le mot '
-                    'de passe.'),
-            TextField(
-              controller: ctrl,
-              obscureText: true,
-              decoration:
-                  const InputDecoration(labelText: 'Nouveau mot de passe'),
-            ),
+      builder: (dCtx) => StatefulBuilder(
+        builder: (dCtx, setLocal) => AlertDialog(
+          title: const Text('Mot de passe de l\'archive'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(_doc?.password == null
+                  ? 'L\'archive n\'est pas chiffrée. Un mot de passe la '
+                      'chiffrera en AES.'
+                  : 'L\'archive est chiffrée. Laissez vide pour retirer le '
+                      'mot de passe.'),
+              TextField(
+                controller: ctrl,
+                obscureText: true,
+                decoration:
+                    const InputDecoration(labelText: 'Nouveau mot de passe'),
+              ),
+              if (is7z)
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Chiffrer aussi les noms des fichiers'),
+                  value: encryptNames,
+                  onChanged: (v) => setLocal(() => encryptNames = v ?? false),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dCtx),
+                child: const Text('Annuler')),
+            FilledButton(
+                onPressed: () => Navigator.pop(dCtx, (ctrl.text, encryptNames)),
+                child: const Text('Appliquer')),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(dCtx),
-              child: const Text('Annuler')),
-          FilledButton(
-              onPressed: () => Navigator.pop(dCtx, ctrl.text),
-              child: const Text('Appliquer')),
-        ],
       ),
     );
     ctrl.dispose();
     if (action == null) return;
+    final (pw, names) = action;
     await _edit((doc) async {
-      doc.setPassword(action.isEmpty ? null : action);
+      doc.setPassword(pw.isEmpty ? null : pw, encryptNames: is7z && names);
       _password = doc.password;
-      return action.isEmpty ? 'Mot de passe retiré' : 'Archive chiffrée (AES)';
+      return pw.isEmpty ? 'Mot de passe retiré' : 'Archive chiffrée (AES)';
     });
   }
 
@@ -608,8 +621,7 @@ class _ArchiveScreenState extends State<ArchiveScreen> {
                   value: 'extractHere', child: Text('Tout extraire ici')),
               const PopupMenuItem(
                   value: 'extractTo', child: Text('Tout extraire vers…')),
-              if (_canEdit &&
-                  (_type == ArchiveType.zip || _type == ArchiveType.jar))
+              if (_canEdit && _type.supportsPassword)
                 const PopupMenuItem(
                     value: 'password', child: Text('Mot de passe…')),
               const PopupMenuItem(value: 'info', child: Text('Informations')),

@@ -8,7 +8,7 @@
 /// d'échec). Le contenu des entrées n'est lu qu'à l'enregistrement (depuis
 /// l'archive d'origine ou depuis le disque pour les fichiers ajoutés).
 ///
-/// Formats modifiables : ZIP (et dérivés), TAR, TAR.GZ, TAR.BZ2 — voir
+/// Formats modifiables : ZIP (et dérivés), TAR, TAR.GZ, TAR.BZ2, 7z — voir
 /// [ArchiveTypeExt.canEdit]. Chemins internes normalisés comme dans
 /// [ArchiveTree] ; les noms saisis sont validés ([FileNameValidator]).
 
@@ -24,6 +24,8 @@ import '../../../core/utils/file_naming.dart';
 import '../models/archive_entry.dart';
 import '../models/archive_tree.dart';
 import 'archive_service.dart';
+import 'seven_zip/seven_zip_reader.dart';
+import 'seven_zip/seven_zip_writer.dart';
 
 /// Contenu d'un fichier, lu seulement quand il faut l'écrire ou le comparer.
 abstract class _Content {
@@ -35,6 +37,25 @@ class _FromArchive implements _Content {
   _FromArchive(this.file);
   @override
   Uint8List read() => file.readBytes() ?? Uint8List(0);
+}
+
+class _From7z implements _Content {
+  final SevenZipArchive archive;
+  final SevenZipEntry entry;
+  _From7z(this.archive, this.entry);
+  @override
+  Uint8List read() {
+    try {
+      return archive.read(entry);
+    } on SevenZipPasswordException catch (e) {
+      throw ArchiveOpException(e.toString(), isPasswordRequired: true);
+    } on SevenZipUnsupportedException catch (e) {
+      throw ArchiveOpException('7z : la méthode « ${e.method} » n\'est pas '
+          'prise en charge : impossible de réécrire l\'archive.');
+    } on FormatException catch (e) {
+      throw ArchiveOpException('Archive 7z illisible : ${e.message}');
+    }
+  }
 }
 
 class _FromDisk implements _Content {
@@ -96,6 +117,9 @@ class ArchiveDocument {
   final ArchiveType type;
   String? _password;
 
+  /// 7z : la liste des fichiers est chiffrée elle aussi.
+  bool _encryptNames = false;
+
   /// Entrées explicites (fichiers et dossiers), par chemin normalisé.
   final Map<String, _Entry> _entries;
 
@@ -103,6 +127,7 @@ class ArchiveDocument {
 
   bool get canEdit => type.canEdit;
   String? get password => _password;
+  bool get encryptNames => _encryptNames;
 
   // ── Ouverture ───────────────────────────────────────────────────────────
 
@@ -129,6 +154,9 @@ class ArchiveDocument {
       return ArchiveDocument._(archivePath, type, password, entries);
     }
 
+    if (type == ArchiveType.sevenZip) {
+      return _open7z(archivePath, bytes, password);
+    }
     final archive = _decode(type, bytes, password);
     if (type == ArchiveType.zip || type == ArchiveType.jar) {
       _checkPassword(archive, password);
@@ -147,6 +175,53 @@ class ArchiveDocument {
       );
     }
     return ArchiveDocument._(archivePath, type, password, entries);
+  }
+
+  static ArchiveDocument _open7z(
+      String archivePath, Uint8List bytes, String? password) {
+    final SevenZipArchive archive;
+    try {
+      archive = SevenZipArchive.open(bytes, password: password);
+    } on SevenZipPasswordException catch (e) {
+      throw ArchiveOpException(e.toString(), isPasswordRequired: true);
+    } on SevenZipUnsupportedException catch (e) {
+      throw ArchiveOpException('7z : ${e.method} non pris en charge.');
+    } on FormatException catch (e) {
+      throw ArchiveOpException('Archive 7z illisible : ${e.message}');
+    }
+    final entries = <String, _Entry>{};
+    for (final e in archive.entries) {
+      if (e.isSymbolicLink) continue; // jamais recréés (voir P0.1)
+      final key = ArchiveTree.normalize(e.name);
+      if (key.isEmpty) continue;
+      final mode = e.unixMode;
+      entries[key] = _Entry(
+        path: key,
+        isDirectory: e.isDirectory,
+        content: e.isDirectory ? null : _From7z(archive, e),
+        size: e.size,
+        modified: e.modified ?? DateTime.now(),
+        mode: mode == null || mode & 0x1FF == 0 ? null : mode & 0x1FF,
+      );
+    }
+    // Contenu chiffré : un fichier est lu tout de suite pour vérifier le
+    // mot de passe (sinon l'erreur n'apparaîtrait qu'à l'enregistrement).
+    final probe =
+        entries.values.where((e) => !e.isDirectory && e.size > 0).firstOrNull;
+    if (probe != null) {
+      try {
+        probe.content!.read();
+      } on ArchiveOpException catch (e) {
+        if (e.isPasswordRequired) rethrow;
+        // Méthode non gérée : liste consultable, enregistrement refusé.
+      }
+    }
+    final pw = (password == null || password.isEmpty) ? null : password;
+    // Mot de passe conservé seulement si l'archive est chiffrée : il sera
+    // réappliqué à l'enregistrement.
+    return ArchiveDocument._(archivePath, ArchiveType.sevenZip,
+        archive.isEncrypted ? pw : null, entries)
+      .._encryptNames = archive.headerEncrypted;
   }
 
   /// Lit un fichier et contrôle son CRC32 : un ZIP chiffré ouvert sans
@@ -521,14 +596,17 @@ class ArchiveDocument {
     return true;
   }
 
-  /// Change le mot de passe (ZIP : chiffrement AES) ; `null` le retire.
-  void setPassword(String? password) {
+  /// Change le mot de passe (ZIP, 7z : chiffrement AES) ; `null` le
+  /// retire. [encryptNames] (7z) chiffre aussi la liste des fichiers.
+  void setPassword(String? password, {bool? encryptNames}) {
     _requireEditable();
-    if (!(type == ArchiveType.zip || type == ArchiveType.jar)) {
+    if (!type.supportsPassword) {
       throw ArchiveOpException(
           '${type.label} : mot de passe non pris en charge.');
     }
     _password = (password == null || password.isEmpty) ? null : password;
+    if (encryptNames != null) _encryptNames = encryptNames;
+    if (_password == null) _encryptNames = false;
   }
 
   // ── Enregistrement ──────────────────────────────────────────────────────
@@ -559,6 +637,8 @@ class ArchiveDocument {
           .encodeBytes(arc.TarEncoder().encodeBytes(archive)),
       ArchiveType.tarBz2 =>
         arc.BZip2Encoder().encodeBytes(arc.TarEncoder().encodeBytes(archive)),
+      ArchiveType.sevenZip => SevenZipWriter.encode(archive,
+          password: _password, encryptHeader: _encryptNames),
       _ => throw ArchiveOpException(type.readOnlyReason ?? 'Lecture seule.'),
     };
     await AtomicWrite.bytes(path, bytes);
